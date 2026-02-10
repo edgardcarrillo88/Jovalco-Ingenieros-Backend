@@ -1,8 +1,11 @@
 const mongoose = require("mongoose");
 const mongoosePaginate = require("mongoose-paginate-v2");
 
-const ComercialSchema = mongoose.Schema(
+const ComercialHistorySchema = mongoose.Schema(
   {
+
+
+
     Cliente: String,
     Especialidad: String,
     Descripcion: String,
@@ -15,9 +18,9 @@ const ComercialSchema = mongoose.Schema(
     Cargo: String,
     Celular: String,
     Correo: String,
-    Version: { type: Number, default: 0 },
+    Version: Number,
 
-    PEP: { type: String, unique: true },
+    PEP: { type: String },
     Estado: String,
     CBSLoad: String,
     Monto: { type: Number, default: 0 },
@@ -32,7 +35,11 @@ const ComercialSchema = mongoose.Schema(
   },
 );
 
-ComercialSchema.plugin(mongoosePaginate);
+ComercialHistorySchema.plugin(mongoosePaginate);
 
-const Comercial = mongoose.model("Comercial", ComercialSchema, "Comercial");
-module.exports = Comercial;
+const ComercialHistory = mongoose.model(
+  "ComercialHistory",
+  ComercialHistorySchema,
+  "ComercialHistory",
+);
+module.exports = ComercialHistory;
