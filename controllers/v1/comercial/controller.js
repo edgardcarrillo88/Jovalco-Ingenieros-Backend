@@ -245,27 +245,6 @@ const UpdateSingleData = async (req, res) => {
     await ComercialHistoryModel.create(history);
     console.log("siguen el try 2");
 
-    // const CodPEP = CBS.filter((item) => item.Nivel === 1)[0].PEP;
-
-    // if (CBS?.length) {
-    //   console.log("Despues del if");
-    //   await ComercialCBSModel.bulkWrite(
-    //     CBS.map((item) => {
-
-    //       const elementoPEPOriginal = item.PEP;
-    //       item.ElementoPEP = elementoPEPOriginal.replace(CodPEP, data.PEP);
-
-    //       updateOne: {
-    //         filter: { ElementoPEP: item.ElementoPEP },
-    //         update: { $set: item },
-    //         upsert: true,
-    //       },
-    //     }),
-    //   );
-
-    //   const historyCBS = CBS.map(({ _id, ...rest }) => rest);
-    //   await ComercialCBSHistoryModel.insertMany(historyCBS);
-    // }
 
     const CodPEP = CBS.find((item) => item.Nivel === 1)?.ElementoPEP;
     console.log(CodPEP);
