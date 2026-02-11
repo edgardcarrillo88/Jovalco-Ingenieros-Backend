@@ -4,7 +4,7 @@ const ComercialModel = require("../../../models/comercial/comercial");
 const ComercialHistoryModel = require("../../../models/comercial/comercial_history");
 const ComercialCounterModel = require("../../../models/comercial/comercial_counter");
 const ComercialCBSModel = require("../../../models/comercial/comercial_CBS");
-const ComercialCBSHistoryModel = require("../../../models/comercial/comercial_CBS_history");
+const ComercialCBSHistoryModel = require("../../../models/comercial/comercial_CBS_History");
 const ClientesModel = require("../../../models/comercial/clientes");
 const EspecialidadesModel = require("../../../models/comercial/especialidades");
 
