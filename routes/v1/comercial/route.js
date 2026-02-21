@@ -17,5 +17,8 @@ datarouter.get("/comercial/getpropuestassingle",datacontroller.GetPropuestasSing
 datarouter.post("/comercial/processwbs", UploadExcel.single('file'),datacontroller.ProcessCBS)
 datarouter.get("/comercial/getwbs",datacontroller.GetCBS)
 
+datarouter.post("/comercial/createAditionalData",datacontroller.CreateAditionalData)
+
+
 
 module.exports = datarouter

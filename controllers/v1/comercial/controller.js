@@ -31,7 +31,8 @@ const LoadSingleData = async (req, res) => {
         (item) => item.Nivel === 1,
       )[0].Venta;
 
-      const CodPEP = req.body.CBS.filter((item) => item.Nivel === 1)[0].ElementoPEP;
+      const CodPEP = req.body.CBS.filter((item) => item.Nivel === 1)[0]
+        .ElementoPEP;
 
       req.body.CBS.map((item) => {
         const elementoPEPOriginal = item.ElementoPEP;
@@ -245,7 +246,6 @@ const UpdateSingleData = async (req, res) => {
     await ComercialHistoryModel.create(history);
     console.log("siguen el try 2");
 
-
     const CodPEP = CBS.find((item) => item.Nivel === 1)?.ElementoPEP;
     console.log(CodPEP);
 
@@ -254,7 +254,6 @@ const UpdateSingleData = async (req, res) => {
 
       await ComercialCBSModel.bulkWrite(
         CBS.map((item) => {
-
           console.log(data.PEP);
           const nuevoElementoPEP = item.ElementoPEP.replace(CodPEP, data.PEP);
 
@@ -284,6 +283,63 @@ const UpdateSingleData = async (req, res) => {
   }
 };
 
+const CreateAditionalData = async (req, res) => {
+  console.log("Cargando datos de comercial");
+  console.log(req.body);
+  try {
+    const getNextPEP =  () => {
+      const PEP = req.body.data.PEP;
+      const Raiz = PEP.split("/")[0];
+      const Base = PEP.split("/")[1];
+      const Adicional = Number(Base)+1;
+
+      return `${Raiz}/${String(Adicional).padStart(3, "0")}`;
+    };
+
+
+    req.body.data.PEP = getNextPEP();
+    console.log(req.body.data);
+    // const PEPGeneral = req.body.data.PEP;
+    // req.body.data.Estado = "En Elaboración";
+
+    // if (req.body.data.CBSLoad.toLowerCase() === "si") {
+    //   req.body.data.Monto = req.body.CBS.filter(
+    //     (item) => item.Nivel === 1,
+    //   )[0].Venta;
+
+    //   const CodPEP = req.body.CBS.filter((item) => item.Nivel === 1)[0]
+    //     .ElementoPEP;
+
+    //   req.body.CBS.map((item) => {
+    //     const elementoPEPOriginal = item.ElementoPEP;
+
+    //     item.Version = 0;
+    //     item.PEP = PEPGeneral;
+    //     item.ElementoPEP = elementoPEPOriginal.replace(CodPEP, PEPGeneral);
+    //     let comercialCBS = new ComercialCBSModel(item);
+    //     let comercialCBSHistory = new ComercialCBSHistoryModel(item);
+    //     comercialCBS.save();
+    //     comercialCBSHistory.save();
+    //   });
+    //   console.log("CBS Cargado");
+    // } else {
+    //   req.body.data.Monto = 0;
+    // }
+
+    const comercial = new ComercialModel(req.body.data);
+    const comercialHistory = new ComercialHistoryModel(req.body.data);
+
+    comercial.save();
+    comercialHistory.save();
+    console.log("Datos de propuesta cargado");
+
+    res.status(200).json({ message: "Datos cargados correctamente" });
+  } catch (error) {
+    console.log(error);
+    res.status(500).json({ message: "Error al cargar los datos" });
+  }
+};
+
 module.exports = {
   LoadSingleData,
   GetClientes,
@@ -293,4 +349,5 @@ module.exports = {
   ProcessCBS,
   GetCBS,
   UpdateSingleData,
+  CreateAditionalData
 };
