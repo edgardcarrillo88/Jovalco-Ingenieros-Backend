@@ -287,50 +287,32 @@ const CreateAditionalData = async (req, res) => {
   console.log("Cargando datos de comercial");
   console.log(req.body);
   try {
-    const getNextPEP =  () => {
+    const getNextPEP = async () => {
       const PEP = req.body.data.PEP;
       const Raiz = PEP.split("/")[0];
-      const Base = PEP.split("/")[1];
-      const Adicional = Number(Base)+1;
+
+      const docs = await ComercialModel.find({  
+        PEP: { $regex: `^${Raiz}/` },
+      }).select("PEP");
+
+      if (docs.length === 0) {
+        return `${Raiz}/001`;
+      }
+
+      const max = Math.max(...docs.map((d) => Number(d.PEP.split("/")[1])));
+      const Adicional = max + 1;
 
       return `${Raiz}/${String(Adicional).padStart(3, "0")}`;
     };
 
-
-    req.body.data.PEP = getNextPEP();
+    req.body.data.PEP = await getNextPEP();
     console.log(req.body.data);
-    // const PEPGeneral = req.body.data.PEP;
-    // req.body.data.Estado = "En Elaboración";
-
-    // if (req.body.data.CBSLoad.toLowerCase() === "si") {
-    //   req.body.data.Monto = req.body.CBS.filter(
-    //     (item) => item.Nivel === 1,
-    //   )[0].Venta;
-
-    //   const CodPEP = req.body.CBS.filter((item) => item.Nivel === 1)[0]
-    //     .ElementoPEP;
-
-    //   req.body.CBS.map((item) => {
-    //     const elementoPEPOriginal = item.ElementoPEP;
-
-    //     item.Version = 0;
-    //     item.PEP = PEPGeneral;
-    //     item.ElementoPEP = elementoPEPOriginal.replace(CodPEP, PEPGeneral);
-    //     let comercialCBS = new ComercialCBSModel(item);
-    //     let comercialCBSHistory = new ComercialCBSHistoryModel(item);
-    //     comercialCBS.save();
-    //     comercialCBSHistory.save();
-    //   });
-    //   console.log("CBS Cargado");
-    // } else {
-    //   req.body.data.Monto = 0;
-    // }
 
     const comercial = new ComercialModel(req.body.data);
     const comercialHistory = new ComercialHistoryModel(req.body.data);
 
-    comercial.save();
-    comercialHistory.save();
+    await comercial.save();
+    await comercialHistory.save();
     console.log("Datos de propuesta cargado");
 
     res.status(200).json({ message: "Datos cargados correctamente" });
@@ -349,5 +331,5 @@ module.exports = {
   ProcessCBS,
   GetCBS,
   UpdateSingleData,
-  CreateAditionalData
+  CreateAditionalData,
 };
