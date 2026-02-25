@@ -19,6 +19,8 @@ datarouter.get("/comercial/getwbs",datacontroller.GetCBS)
 
 datarouter.post("/comercial/createAditionalData",datacontroller.CreateAditionalData)
 
+datarouter.post("/comercial/createcliente",datacontroller.CreateClient)
+
 
 
 module.exports = datarouter

@@ -291,7 +291,7 @@ const CreateAditionalData = async (req, res) => {
       const PEP = req.body.data.PEP;
       const Raiz = PEP.split("/")[0];
 
-      const docs = await ComercialModel.find({  
+      const docs = await ComercialModel.find({
         PEP: { $regex: `^${Raiz}/` },
       }).select("PEP");
 
@@ -322,6 +322,20 @@ const CreateAditionalData = async (req, res) => {
   }
 };
 
+const CreateClient = async (req, res) => {
+  console.log("Creando cliente");
+  console.log(req.body);
+  try {
+    const client = new ClientesModel(req.body);
+    await client.save();
+    console.log("Cliente creado");
+    res.status(200).json({ message: "Cliente creado correctamente" });
+  } catch (error) {
+    console.log(error);
+    res.status(500).json({ message: "Error al crear el cliente" });
+  }
+};
+
 module.exports = {
   LoadSingleData,
   GetClientes,
@@ -332,4 +346,5 @@ module.exports = {
   GetCBS,
   UpdateSingleData,
   CreateAditionalData,
+  CreateClient
 };

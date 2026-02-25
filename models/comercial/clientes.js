@@ -1,7 +1,8 @@
 const mongoose = require('mongoose')
 
 const ClientesSchema = mongoose.Schema({
-    Empresa: String,    
+    Empresa: String,
+    RUC: String,    
     deleted: { type: Boolean, default: false }
 },
     {
