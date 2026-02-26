@@ -223,7 +223,11 @@ const GetCBS = async (req, res) => {
     console.log(req.query.id);
     const response = await ComercialModel.findById(req.query.id);
     const PEP = response.PEP;
-    const responseCBS = await ComercialCBSModel.find({ PEP });
+    console.log("PEP: ", PEP);
+    // const responseCBS = await ComercialCBSModel.find({ PEP });
+    const responseCBS = await ComercialCBSModel.find({
+      ElementoPEP: { $regex: `^${PEP}` },
+    });
     res
       .status(200)
       .json({ message: "Datos obtenidos correctamente", data: responseCBS });
@@ -346,5 +350,5 @@ module.exports = {
   GetCBS,
   UpdateSingleData,
   CreateAditionalData,
-  CreateClient
+  CreateClient,
 };
