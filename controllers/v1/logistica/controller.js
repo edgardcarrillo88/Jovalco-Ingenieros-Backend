@@ -2,6 +2,7 @@ const SolpedModel = require('../../../models/logistica/solped');
 const SolpedCounterModel = require('../../../models/logistica/solped_counter');
 const ComercialCBSModel = require('../../../models/comercial/comercial_CBS');
 const ComercialModel = require('../../../models/comercial/comercial');
+const { ACCOUNTING_CATALOG } = require('../../../constants/accounting_catalog');
 
 const AUTH_BYPASS = true;
 
@@ -46,6 +47,46 @@ const mapItems = (items = []) =>
     unidad: String(item.unidad || '').trim(),
     precioEstimado: Number(item.precioEstimado || 0),
   }));
+
+const validateAccountingClassification = (payload = {}) => {
+  const accountingClass = String(payload.accountingClass || '').trim().toUpperCase();
+  const accountingCategory = String(payload.accountingCategory || '').trim();
+  const accountingSubcategory = String(payload.accountingSubcategory || '').trim();
+  const costCenter = String(payload.costCenter || '').trim();
+  const loanComponent = String(payload.loanComponent || 'NONE').trim().toUpperCase();
+
+  if (!accountingClass || !ACCOUNTING_CATALOG[accountingClass]) {
+    return { ok: false, message: 'Debe seleccionar un tipo de gasto contable valido' };
+  }
+
+  const validCategories = ACCOUNTING_CATALOG[accountingClass] || [];
+  if (!accountingCategory || !validCategories.includes(accountingCategory)) {
+    return { ok: false, message: 'Debe seleccionar una categoria contable valida' };
+  }
+
+  if (accountingClass === 'LOAN' && !['CAPITAL', 'INTEREST'].includes(loanComponent)) {
+    return { ok: false, message: 'Para prestamos debe definir si es capital o interes' };
+  }
+
+  if (accountingClass !== 'LOAN' && loanComponent !== 'NONE') {
+    return { ok: false, message: 'Componente de prestamo solo aplica para tipo Prestamo' };
+  }
+
+  if (!costCenter) {
+    return { ok: false, message: 'Debe seleccionar un centro de costo' };
+  }
+
+  return {
+    ok: true,
+    value: {
+      accountingClass,
+      accountingCategory,
+      accountingSubcategory,
+      costCenter,
+      loanComponent,
+    },
+  };
+};
 
 const getAdjudicadoPepSet = async () => {
   const peps = await ComercialModel.distinct('PEP', {
@@ -228,12 +269,23 @@ const CreateSolped = async (req, res) => {
 
     const status = req.body.submit === true ? 'Pendiente Aprobacion' : 'Borrador';
 
+    const accountingValidation = validateAccountingClassification(req.body);
+    if (!accountingValidation.ok) {
+      return res.status(400).json({ success: false, message: accountingValidation.message });
+    }
+
     const solped = new SolpedModel({
       solpedNumber: await getNextSolpedNumber(),
       requesterName,
       requesterEmail,
       centro: String(req.body.centro || '').trim(),
       grupoCompra: String(req.body.grupoCompra || '').trim(),
+      accountingClass: accountingValidation.value.accountingClass,
+      accountingCategory: accountingValidation.value.accountingCategory,
+      accountingSubcategory: accountingValidation.value.accountingSubcategory,
+      costCenter: accountingValidation.value.costCenter,
+      loanComponent: accountingValidation.value.loanComponent,
+      accountingUpdatedBy: requesterEmail,
       observaciones: String(req.body.observaciones || '').trim(),
       totalEstimado,
       status,
@@ -291,8 +343,19 @@ const UpdateSolped = async (req, res) => {
 
     const status = req.body.submit === true ? 'Pendiente Aprobacion' : 'Borrador';
 
+    const accountingValidation = validateAccountingClassification(req.body);
+    if (!accountingValidation.ok) {
+      return res.status(400).json({ success: false, message: accountingValidation.message });
+    }
+
     solped.requesterName = String(req.body.requesterName || solped.requesterName || '').trim();
     solped.requesterEmail = requesterEmail || solped.requesterEmail;
+    solped.accountingClass = accountingValidation.value.accountingClass;
+    solped.accountingCategory = accountingValidation.value.accountingCategory;
+    solped.accountingSubcategory = accountingValidation.value.accountingSubcategory;
+    solped.costCenter = accountingValidation.value.costCenter;
+    solped.loanComponent = accountingValidation.value.loanComponent;
+    solped.accountingUpdatedBy = requesterEmail || 'sistema';
     solped.observaciones = String(req.body.observaciones || '').trim();
     solped.items = items;
     solped.totalEstimado = totalEstimado;

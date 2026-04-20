@@ -33,6 +33,44 @@ const ActivitySchema = new mongoose.Schema(
   },
 );
 
+const ValuationItemSchema = new mongoose.Schema(
+  {
+    pep: { type: String, default: "", trim: true },
+    elementoPEP: { type: String, required: true, trim: true },
+    nivel: { type: String, default: "", trim: true },
+    descripcion: { type: String, default: "", trim: true },
+    costo: { type: Number, default: 0 },
+    venta: { type: Number, default: 0 },
+    real: { type: Number, default: 0 },
+    valorizado: { type: Number, default: 0 },
+    comentario: { type: String, default: "", trim: true },
+  },
+  {
+    _id: true,
+    timestamps: false,
+  },
+);
+
+const ValuationSchema = new mongoose.Schema(
+  {
+    number: { type: Number, required: true, min: 1 },
+    valuationDate: { type: Date, required: true },
+    comments: { type: String, default: "", trim: true },
+    totalValorizado: { type: Number, default: 0 },
+    source: { type: String, enum: ["manual", "excel"], default: "manual" },
+    invoiceIssued: { type: Boolean, default: false },
+    invoiceNumber: { type: String, default: "", trim: true },
+    invoiceIssuedAt: { type: Date, default: null },
+    invoiceIssuedBy: { type: String, default: "", trim: true },
+    items: { type: [ValuationItemSchema], default: [] },
+    createdBy: { type: String, default: "sistema", trim: true },
+    updatedBy: { type: String, default: "sistema", trim: true },
+  },
+  {
+    timestamps: true,
+  },
+);
+
 const ProjectTrackingSchema = new mongoose.Schema(
   {
     pep: { type: String, unique: true, required: true, trim: true },
@@ -42,6 +80,7 @@ const ProjectTrackingSchema = new mongoose.Schema(
     state: { type: String, default: "", trim: true },
     history: [HistoryEntrySchema],
     activities: [ActivitySchema],
+    valuations: { type: [ValuationSchema], default: [] },
   },
   {
     timestamps: true,
