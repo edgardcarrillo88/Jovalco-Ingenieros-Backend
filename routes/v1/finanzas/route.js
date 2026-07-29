@@ -14,6 +14,8 @@ router.get('/finanzas/payables/payments-history', controller.getPaymentsHistory)
 router.post('/finanzas/payables/recurrent', controller.createRecurrentPayable);
 router.get('/finanzas/recurrent', controller.getRecurrentPayables);
 router.patch('/finanzas/recurrent/:id/active', controller.toggleRecurrentPayableActive);
+router.put('/finanzas/recurrent/:id', controller.updateRecurrentPayableById);
+router.delete('/finanzas/recurrent/:id', controller.deleteRecurrentPayableById);
 router.patch('/finanzas/payables/recurrent/:id/status', controller.updateRecurrentPayableStatus);
 router.patch('/finanzas/payables/solped/:id/status', controller.updateSolpedPaymentStatus);
 

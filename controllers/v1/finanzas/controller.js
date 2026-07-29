@@ -473,7 +473,7 @@ const getPayables = async (req, res) => {
     }
 
     const solpeds = await SolpedModel.find(solpedFilter)
-      .select('solpedNumber requesterName requesterEmail totalEstimado paidAmount paymentStatus paymentReference paidAt createdAt source recurrentConcept recurrentCycleDate accountingClass accountingCategory accountingSubcategory costCenter loanComponent')
+      .select('solpedNumber requesterName requesterEmail totalEstimado paidAmount paymentStatus paymentReference paidAt createdAt source recurrentConcept recurrentCycleDate accountingClass accountingCategory accountingSubcategory costCenter loanComponent cuentaCargo')
       .sort({ createdAt: -1 })
       .lean();
 
@@ -494,6 +494,7 @@ const getPayables = async (req, res) => {
       accountingSubcategory: row.accountingSubcategory || '',
       costCenter: row.costCenter || '',
       loanComponent: row.loanComponent || 'NONE',
+      cuentaCargo: row.cuentaCargo || '',
       dueDate: row.recurrentCycleDate || row.createdAt,
       status: row.paymentStatus || 'Pendiente',
       paymentReference: row.paymentReference || '',
@@ -810,6 +811,11 @@ const updateSolpedPaymentStatus = async (req, res) => {
     row.paidAmount = Math.min(nextPaidAmount, totalAmount);
     row.paidAt = status === 'Pagado' ? paidAt : row.paidAt;
 
+    const cuentaCargo = String(req.body.cuentaCargo || '').trim();
+    if (cuentaCargo && ['IBK-SOL', 'IBK-USD', 'CAJA-CHICA'].includes(cuentaCargo)) {
+      row.cuentaCargo = cuentaCargo;
+    }
+
     if (wantsAccountingOverride) {
       row.accountingClass = normalizedAccounting.value.accountingClass;
       row.accountingCategory = normalizedAccounting.value.accountingCategory;
@@ -841,6 +847,67 @@ const updateSolpedPaymentStatus = async (req, res) => {
   } catch (error) {
     console.error('[updateSolpedPaymentStatus] Error:', error.message);
     return res.status(500).json({ success: false, message: 'Error al actualizar estado de pago de SOLPED' });
+  }
+};
+
+const updateRecurrentPayableById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userEmail = getUserEmail(req);
+    const ALLOWED = [
+      'concept', 'category', 'provider', 'pep',
+      'accountingClass', 'accountingCategory', 'accountingSubcategory', 'costCenter', 'loanComponent',
+      'amount', 'currency', 'frequency', 'paymentReferenceDay', 'nextDueDate', 'notes', 'isActive',
+    ];
+
+    const update = {};
+    ALLOWED.forEach((field) => {
+      if (req.body[field] !== undefined) {
+        update[field] = req.body[field];
+      }
+    });
+
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ success: false, message: 'No hay campos para actualizar' });
+    }
+
+    update.updatedBy = userEmail;
+
+    const row = await RecurrentPayableModel.findOneAndUpdate(
+      { _id: id, deleted: { $ne: true } },
+      { $set: update },
+      { new: true },
+    );
+
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'Cuenta recurrente no encontrada' });
+    }
+
+    return res.status(200).json({ success: true, message: 'Recurrente actualizada', data: row });
+  } catch (error) {
+    console.error('[updateRecurrentPayableById] Error:', error.message);
+    return res.status(500).json({ success: false, message: 'Error al actualizar cuenta recurrente' });
+  }
+};
+
+const deleteRecurrentPayableById = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const row = await RecurrentPayableModel.findOneAndUpdate(
+      { _id: id, deleted: { $ne: true } },
+      { $set: { deleted: true, updatedBy: getUserEmail(req) } },
+      { new: true },
+    );
+
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'Cuenta recurrente no encontrada' });
+    }
+
+    return res.status(200).json({ success: true, message: 'Recurrente eliminada (soft delete)' });
+  } catch (error) {
+    console.error('[deleteRecurrentPayableById] Error:', error.message);
+    return res.status(500).json({ success: false, message: 'Error al eliminar cuenta recurrente' });
   }
 };
 
@@ -1263,6 +1330,8 @@ module.exports = {
   toggleRecurrentPayableActive,
   updateRecurrentPayableStatus,
   updateSolpedPaymentStatus,
+  updateRecurrentPayableById,
+  deleteRecurrentPayableById,
   getPaymentsHistory,
   getAccountingCatalog,
   getFinancialStatement,

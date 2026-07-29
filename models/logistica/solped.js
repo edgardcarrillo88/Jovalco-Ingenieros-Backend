@@ -41,6 +41,11 @@ const SolpedSchema = mongoose.Schema(
       default: 'Borrador',
       index: true,
     },
+    cuentaCargo: {
+      type: String,
+      enum: ['', 'IBK-SOL', 'IBK-USD', 'CAJA-CHICA'],
+      default: '',
+    },
     paymentStatus: {
       type: String,
       enum: ['Pendiente', 'Programado', 'Parcial', 'Pagado'],

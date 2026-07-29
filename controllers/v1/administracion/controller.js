@@ -1,4 +1,5 @@
 const PersonalModel = require('../../../models/administracion/personal');
+const PersonalHistoryModel = require('../../../models/administracion/personal_history');
 const mongoose = require('mongoose');
 
 const ALLOWED_FIELDS = [
@@ -13,6 +14,8 @@ const ALLOWED_FIELDS = [
     'fechaIngreso',
     'tipoContrato',
     'tiempoContrato',
+    'fechaRenovacion',
+    'tiempoRenovacion',
     'categoriaPersonal',
     'puesto',
     'altaSunat',
@@ -235,6 +238,13 @@ const UpdatePersonal = async (req, res) => {
             { ...updateData, ...(dni ? { dni } : {}) },
             { new: true, runValidators: true }
         );
+        
+        if (personalActualizado) {
+            const historyData = personalActualizado.toObject();
+            delete historyData._id;
+            historyData.personalId = personalActualizado._id;
+            await PersonalHistoryModel.create(historyData);
+        }
         
         console.log('[UpdatePersonal] Personal actualizado exitosamente');
         

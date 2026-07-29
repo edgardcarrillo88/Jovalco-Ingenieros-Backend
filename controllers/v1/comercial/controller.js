@@ -25,6 +25,7 @@ const LoadSingleData = async (req, res) => {
     req.body.data.PEP = await getNextPEP();
     const PEPGeneral = req.body.data.PEP;
     req.body.data.Estado = "En Elaboración";
+    req.body.data.Comentarios = req.body.data.Comentarios || "";
 
     if (req.body.data.CBSLoad.toLowerCase() === "si") {
       req.body.data.Monto = req.body.CBS.filter(
@@ -92,7 +93,40 @@ const GetEspeciialidades = async (req, res) => {
 
 const GetPropuestas = async (req, res) => {
   try {
-    const response = await ComercialModel.find();
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 10;
+    const filter = {};
+
+    if (req.query.Cliente) {
+      filter.Cliente = { $regex: new RegExp(req.query.Cliente, "i") };
+    }
+    if (req.query.Especialidad) {
+      filter.Especialidad = {
+        $regex: new RegExp(req.query.Especialidad, "i"),
+      };
+    }
+    if (req.query.PEP) {
+      filter.PEP = { $regex: new RegExp(req.query.PEP, "i") };
+    }
+    if (req.query.Descripcion) {
+      filter.Descripcion = {
+        $regex: new RegExp(req.query.Descripcion, "i"),
+      };
+    }
+    if (req.query.CBSLoad) {
+      filter.CBSLoad = req.query.CBSLoad;
+    }
+    if (req.query.Estado) {
+      filter.Estado = req.query.Estado;
+    }
+
+    const options = {
+      page,
+      limit,
+      sort: { createdAt: -1 },
+    };
+
+    const response = await ComercialModel.paginate(filter, options);
     res
       .status(200)
       .json({ message: "Datos obtenidos correctamente", data: response });
@@ -242,6 +276,7 @@ const UpdateSingleData = async (req, res) => {
   console.log(req.body);
   try {
     const { data, CBS } = req.body;
+    data.Comentarios = data.Comentarios || "";
     console.log("iniciando try");
     await ComercialModel.findByIdAndUpdate(data._id, data);
     console.log("siguien el try");
