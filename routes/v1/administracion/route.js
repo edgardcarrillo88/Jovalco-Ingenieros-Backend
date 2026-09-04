@@ -1,6 +1,14 @@
 const express = require('express');
 const adminRouter = express.Router();
 const adminController = require('../../../controllers/v1/administracion/controller');
+const authMiddleware = require('../../../middleware/v1/auth');
+
+// El módulo administración requiere autenticación (Bearer token de NextAuth).
+// Se permite OPTIONS para el preflight de CORS.
+adminRouter.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return next();
+  return authMiddleware(req, res, next);
+});
 
 /**
  * Personal Routes

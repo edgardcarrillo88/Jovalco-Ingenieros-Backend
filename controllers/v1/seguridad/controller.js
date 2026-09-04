@@ -5,6 +5,9 @@ const SeguridadChecklistCumplimientoModel = require('../../../models/seguridad/c
 const SeguridadEventoModel = require('../../../models/seguridad/evento');
 const SeguridadCatalogoModel = require('../../../models/seguridad/catalogo');
 const SeguridadDocumentoModel = require('../../../models/seguridad/documento');
+const mongoose = require('mongoose');
+
+const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
 const toNum = (v) => { const n = Number(v); return Number.isFinite(n) ? Math.max(n, 0) : 0; };
 
@@ -108,6 +111,17 @@ const listFichas = async (req, res) => {
 const getFicha = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID de personal inválido' });
+    }
+
+    // Coherencia con Administración: la ficha solo puede crearse para un
+    // personal existente y activo.
+    const personal = await PersonalModel.findOne({ _id: id, deleted: false }).lean();
+    if (!personal) {
+      return res.status(404).json({ success: false, message: 'Personal no encontrado en Administración' });
+    }
+
     let ficha = await SeguridadPersonalModel.findOne({ personalId: id }).lean();
     if (!ficha) {
       ficha = await SeguridadPersonalModel.create({ personalId: id });
@@ -124,6 +138,9 @@ const getFicha = async (req, res) => {
 const addExamen = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
     const examen = {
       tipo: String(req.body.tipo || '').trim(),
       fechaRealizacion: new Date(req.body.fechaRealizacion),
@@ -150,6 +167,9 @@ const addExamen = async (req, res) => {
 const updateExamen = async (req, res) => {
   try {
     const { id, examenIdx } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
     const idx = Number(examenIdx);
     const update = {};
     if (req.body.tipo !== undefined) update['examenesMedicos.' + idx + '.tipo'] = req.body.tipo;
@@ -179,6 +199,9 @@ const updateExamen = async (req, res) => {
 const addCertificacion = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
     const cert = {
       tipo: String(req.body.tipo || '').trim(),
       fechaEmision: new Date(req.body.fechaEmision),
@@ -205,6 +228,9 @@ const addCertificacion = async (req, res) => {
 const updateCertificacion = async (req, res) => {
   try {
     const { id, certIdx } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
     const idx = Number(certIdx);
     const update = {};
     if (req.body.tipo !== undefined) update['certificaciones.' + idx + '.tipo'] = req.body.tipo;
@@ -230,6 +256,9 @@ const updateCertificacion = async (req, res) => {
 const addCapacitacion = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
     const cap = {
       curso: String(req.body.curso || '').trim(),
       tipo: String(req.body.tipo || '').trim(),
@@ -260,6 +289,9 @@ const addCapacitacion = async (req, res) => {
 const addEntregaEPP = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
     const epp = {
       tipoEPP: String(req.body.tipoEPP || '').trim(),
       fecha: req.body.fecha ? new Date(req.body.fecha) : new Date(),
@@ -286,6 +318,9 @@ const addEntregaEPP = async (req, res) => {
 const getUltimasEntregasEPP = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
     const ficha = await SeguridadPersonalModel.findOne({ personalId: id }).lean();
     if (!ficha) return res.status(200).json({ success: true, data: [] });
 
@@ -335,6 +370,9 @@ const createDocumento = async (req, res) => {
 const updateDocumento = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
     const update = {};
     if (req.body.nombre !== undefined) update.nombre = String(req.body.nombre).trim();
     if (req.body.categoria !== undefined) update.categoria = String(req.body.categoria).trim();
@@ -518,7 +556,9 @@ const getResumenChecklist = async (req, res) => {
         itemsRow[col.nombre] = estado?.estado || 'Pendiente';
         if (estado?.estado === 'Vigente') docsVigentes++;
       });
-      return { personalId: p._id, nombres: p.nombres, apellidos: p.apellidos, dni: p.dni, items: itemsRow, porcentaje: 0 };
+      // Porcentaje real de cumplimiento del trabajador.
+      const porcentaje = columnas.length > 0 ? Math.round((docsVigentes / columnas.length) * 100) : 0;
+      return { personalId: p._id, nombres: p.nombres, apellidos: p.apellidos, dni: p.dni, items: itemsRow, porcentaje };
     });
 
     return res.status(200).json({ success: true, data: { rows, columnas, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } } });
@@ -593,6 +633,9 @@ const createEvento = async (req, res) => {
 const updateEvento = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
     const allowed = ['fecha', 'pep', 'area', 'lugar', 'personalId', 'tipo', 'descripcion', 'criticidad', 'estado', 'evidencias', 'responsable'];
     const update = {};
     allowed.forEach((field) => {
@@ -623,6 +666,9 @@ const updateEvento = async (req, res) => {
 const addAccionCorrectiva = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
     const accion = {
       accion: String(req.body.accion || '').trim(),
       responsable: String(req.body.responsable || '').trim(),
@@ -649,6 +695,9 @@ const addAccionCorrectiva = async (req, res) => {
 const updateAccionCorrectiva = async (req, res) => {
   try {
     const { id, accIdx } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
     const idx = Number(accIdx);
     const update = {};
     if (req.body.accion !== undefined) update['accionesCorrectivas.' + idx + '.accion'] = req.body.accion;

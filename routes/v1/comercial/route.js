@@ -2,7 +2,15 @@ const express = require('express');
 const datarouter = express.Router()
 const datacontroller = require('../../../controllers/v1/comercial/controller');
 const UploadExcel =  require('../../../middleware/v1/excelprocess')
+const authMiddleware = require('../../../middleware/v1/auth')
 
+
+// El módulo comercial requiere autenticación (Bearer token de NextAuth).
+// Se permite OPTIONS para el preflight de CORS.
+datarouter.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return next();
+  return authMiddleware(req, res, next);
+});
 
 //datarouter.post("/createsingledata",UploadExcel.single('file'),datacontroller.LoadSingleData)
 datarouter.post("/comercial/createsingledata",datacontroller.LoadSingleData)

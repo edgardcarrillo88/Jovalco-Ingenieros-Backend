@@ -1,21 +1,34 @@
 const TimesheetModel = require('../../../models/equipo/timesheet');
 const ComercialModel = require('../../../models/comercial/comercial');
+const { isEquipoApprover } = require('../../../services/v1/seguridad/userService');
+const mongoose = require('mongoose');
 
-const AUTH_BYPASS = true;
+// AUTH_BYPASS elimina la autorización por aprobadores (solo para desarrollo puntual).
+const AUTH_BYPASS = false;
 
-const getApproverEmails = () =>
-  (process.env.TIMESHEET_APPROVER_EMAILS || process.env.SOLPED_APPROVER_EMAILS || '')
-    .split(',')
-    .map((mail) => mail.trim().toLowerCase())
-    .filter(Boolean);
-
-const isApprover = (email) => {
+// El aprobador se determina consultando la colección User por email.
+// Ya no se usa TIMESHEET_APPROVER_EMAILS ni SOLPED_APPROVER_EMAILS.
+const isApprover = async (email) => {
   if (AUTH_BYPASS) return true;
-  return getApproverEmails().includes(String(email || '').toLowerCase());
+  return isEquipoApprover(email);
 };
 
+/**
+ * Obtiene el email del usuario autenticado.
+ * Fuente principal: el token JWT validado (req.user.email). El header
+ * x-user-email o el body se usan solo como respaldo (procesos internos).
+ */
 const getRequesterEmail = (req) =>
-  String(req.headers['x-user-email'] || req.body?.requesterEmail || '').trim().toLowerCase();
+  String(
+    req.user?.email ||
+      req.headers['x-user-email'] ||
+      req.body?.requesterEmail ||
+      '',
+  )
+    .trim()
+    .toLowerCase();
+
+const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
 const parseDateOrNull = (value) => {
   if (!value) return null;
@@ -152,6 +165,10 @@ const createTimesheet = async (req, res) => {
 const updateTimesheet = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID de timesheet inválido' });
+    }
+
     const requesterEmail = getRequesterEmail(req);
 
     const row = await TimesheetModel.findOne({ _id: id, deleted: false });
@@ -159,7 +176,7 @@ const updateTimesheet = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Timesheet no encontrado' });
     }
 
-    if (!AUTH_BYPASS && !isApprover(requesterEmail) && row.requesterEmail !== requesterEmail) {
+    if (!AUTH_BYPASS && !(await isApprover(requesterEmail)) && row.requesterEmail !== requesterEmail) {
       return res.status(403).json({ success: false, message: 'No autorizado para editar este timesheet' });
     }
 
@@ -205,7 +222,7 @@ const updateTimesheet = async (req, res) => {
 
 const getTimesheets = async (req, res) => {
   try {
-    const email = String(req.headers['x-user-email'] || req.query.email || '').trim().toLowerCase();
+    const email = getRequesterEmail(req) || String(req.query.email || '').trim().toLowerCase();
     const mine = String(req.query.mine || 'false').toLowerCase() === 'true';
     const status = toTitleCaseStatus(req.query.status);
     const pep = String(req.query.pep || '').trim();
@@ -214,7 +231,7 @@ const getTimesheets = async (req, res) => {
 
     const filter = { deleted: false };
 
-    if (!AUTH_BYPASS && (!isApprover(email) || mine)) {
+    if (!AUTH_BYPASS && (!(await isApprover(email)) || mine)) {
       filter.requesterEmail = email;
     }
 
@@ -245,9 +262,9 @@ const getTimesheets = async (req, res) => {
 
 const getApprovalQueue = async (req, res) => {
   try {
-    const email = String(req.headers['x-user-email'] || '').trim().toLowerCase();
+    const email = getRequesterEmail(req);
 
-    if (!AUTH_BYPASS && !isApprover(email)) {
+    if (!AUTH_BYPASS && !(await isApprover(email))) {
       return res.status(403).json({ success: false, message: 'No autorizado para aprobar timesheets' });
     }
 
@@ -267,13 +284,17 @@ const getApprovalQueue = async (req, res) => {
 
 const approveTimesheet = async (req, res) => {
   try {
-    const email = String(req.headers['x-user-email'] || '').trim().toLowerCase();
+    const email = getRequesterEmail(req);
 
-    if (!AUTH_BYPASS && !isApprover(email)) {
+    if (!AUTH_BYPASS && !(await isApprover(email))) {
       return res.status(403).json({ success: false, message: 'No autorizado para aprobar timesheets' });
     }
 
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID de timesheet inválido' });
+    }
+
     const action = String(req.body.action || '').trim().toLowerCase();
     const comment = String(req.body.comment || '').trim();
 
@@ -323,8 +344,8 @@ const approveTimesheet = async (req, res) => {
 
 const getDashboard = async (req, res) => {
   try {
-    const email = String(req.headers['x-user-email'] || '').trim().toLowerCase();
-    const approver = AUTH_BYPASS ? true : isApprover(email);
+    const email = getRequesterEmail(req);
+    const approver = AUTH_BYPASS ? true : await isApprover(email);
 
     const filter = { deleted: false };
     if (!approver) {

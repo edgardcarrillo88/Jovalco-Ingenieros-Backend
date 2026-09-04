@@ -1,6 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const controller = require('../../../controllers/v1/finanzas/controller');
+const authMiddleware = require('../../../middleware/v1/auth');
+
+// El módulo finanzas requiere autenticación (Bearer token de NextAuth).
+// Se permite OPTIONS para el preflight de CORS.
+router.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return next();
+  return authMiddleware(req, res, next);
+});
 
 router.get('/finanzas/valuations/pending', controller.getInvoiceCandidates);
 router.get('/finanzas/accounting/catalog', controller.getAccountingCatalog);

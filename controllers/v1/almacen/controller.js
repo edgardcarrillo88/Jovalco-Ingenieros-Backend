@@ -2,14 +2,50 @@ const InventoryItemModel = require('../../../models/almacen/item');
 const InventoryStockModel = require('../../../models/almacen/stock');
 const InventoryMovementModel = require('../../../models/almacen/movement');
 const InventoryCategoryModel = require('../../../models/almacen/category');
+const ComercialModel = require('../../../models/comercial/comercial');
+const mongoose = require('mongoose');
 
 const toNumber = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? Math.max(n, 0) : 0;
 };
 
+/**
+ * Obtiene el email del usuario autenticado.
+ * Fuente principal: el token JWT validado (req.user.email). El header
+ * x-user-email o el body solo se usan como respaldo para procesos internos.
+ */
 const getEmail = (req) =>
-  String(req.headers['x-user-email'] || req.body?.usuario || 'sistema').trim().toLowerCase();
+  String(
+    req.user?.email ||
+      req.headers['x-user-email'] ||
+      req.body?.usuario ||
+      'sistema',
+  )
+    .trim()
+    .toLowerCase();
+
+const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+
+/**
+ * Valida que un PEP exista y esté adjudicado en el módulo Comercial.
+ * Interacción Almacén ↔ Comercial: los movimientos con destino PEP deben
+ * apuntar a un proyecto adjudicado (misma regla que usa Logística).
+ */
+const ensurePepAdjudicado = async (pep) => {
+  const pepLimpio = String(pep || '').trim();
+  if (!pepLimpio) return false;
+
+  const found = await ComercialModel.findOne({
+    deleted: { $ne: true },
+    PEP: pepLimpio,
+    Estado: { $regex: '^\\s*adjudicado\\s*$', $options: 'i' },
+  })
+    .select('_id')
+    .lean();
+
+  return Boolean(found);
+};
 
 // ─── Categorías ──────────────────────────────────────────────────────────────
 
@@ -53,10 +89,18 @@ const createCategory = async (req, res) => {
 const listItems = async (req, res) => {
   try {
     const categoria = String(req.query.categoria || '').trim();
+    const tipo = String(req.query.tipo || '').trim();
     const search = String(req.query.search || '').trim();
     const filter = { deleted: false };
     if (categoria) filter.categoria = categoria;
-    if (search) filter.nombre = { $regex: search, $options: 'i' };
+    if (tipo) filter.tipo = tipo;
+    if (search) {
+      // Búsqueda por nombre o código.
+      filter.$or = [
+        { nombre: { $regex: search, $options: 'i' } },
+        { codigo: { $regex: search, $options: 'i' } },
+      ];
+    }
 
     const rows = await InventoryItemModel.find(filter).sort({ nombre: 1 }).lean();
     return res.status(200).json({ success: true, data: rows });
@@ -71,8 +115,26 @@ const createItem = async (req, res) => {
     const nombre = String(req.body.nombre || '').trim();
     if (!nombre) return res.status(400).json({ success: false, message: 'Nombre del item requerido' });
 
+    const codigo = String(req.body.codigo || '').trim();
     const categoria = String(req.body.categoria || '').trim();
     if (!categoria) return res.status(400).json({ success: false, message: 'Categoría requerida' });
+
+    // Evitar duplicados (mismo nombre o mismo código) entre items no eliminados.
+    const duplicado = await InventoryItemModel.findOne({
+      deleted: false,
+      $or: [
+        { nombre },
+        ...(codigo ? [{ codigo }] : []),
+      ],
+    }).lean();
+    if (duplicado) {
+      return res.status(400).json({
+        success: false,
+        message: duplicado.nombre === nombre
+          ? `Ya existe un item con el nombre "${nombre}"`
+          : `Ya existe un item con el código "${codigo}"`,
+      });
+    }
 
     const catExists = await InventoryCategoryModel.findOne({ nombre: categoria, deleted: false }).lean();
     if (!catExists) {
@@ -80,7 +142,7 @@ const createItem = async (req, res) => {
     }
 
     const item = await InventoryItemModel.create({
-      codigo: String(req.body.codigo || '').trim(),
+      codigo,
       nombre,
       categoria,
       tipo: String(req.body.tipo || 'Componente').trim(),
@@ -101,6 +163,8 @@ const createItem = async (req, res) => {
 const updateItem = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) return res.status(400).json({ success: false, message: 'Id de item inválido' });
+
     const allowed = [
       'codigo', 'nombre', 'categoria', 'tipo',
       'costoUnitario', 'stockSeguridad',
@@ -229,6 +293,9 @@ const registerIngreso = async (req, res) => {
     if (!itemId || cantidad <= 0) return res.status(400).json({ success: false, message: 'Item y cantidad > 0 requeridos' });
     if (destino !== 'ALMACEN' && destino !== 'PEP') return res.status(400).json({ success: false, message: 'Destino debe ser ALMACEN o PEP' });
     if (destino === 'PEP' && !destinoRef) return res.status(400).json({ success: false, message: 'Debe seleccionar un PEP de destino' });
+    if (destino === 'PEP' && !(await ensurePepAdjudicado(destinoRef))) {
+      return res.status(400).json({ success: false, message: 'El PEP de destino no existe o no está adjudicado' });
+    }
 
     const item = await InventoryItemModel.findOne({ _id: itemId, deleted: false });
     if (!item) return res.status(404).json({ success: false, message: 'Item no encontrado en catálogo' });
@@ -269,6 +336,9 @@ const registerSalida = async (req, res) => {
     if (!itemId || cantidad <= 0) return res.status(400).json({ success: false, message: 'Item y cantidad > 0 requeridos' });
     if (destino !== 'ALMACEN' && destino !== 'PEP') return res.status(400).json({ success: false, message: 'Destino debe ser ALMACEN o PEP' });
     if (destino === 'PEP' && !destinoRef) return res.status(400).json({ success: false, message: 'Debe seleccionar PEP de destino' });
+    if (destino === 'PEP' && !(await ensurePepAdjudicado(destinoRef))) {
+      return res.status(400).json({ success: false, message: 'El PEP de destino no existe o no está adjudicado' });
+    }
 
     const stock = await InventoryStockModel.findOne({ itemId });
     if (!stock || stock.cantidad < cantidad) return res.status(400).json({ success: false, message: 'Stock insuficiente' });
@@ -314,6 +384,10 @@ const registerMultipleSalidas = async (req, res) => {
       if (!itemId || cantidad <= 0) { errores.push({ itemId: itemId || '?', error: 'Item y cantidad > 0 requeridos' }); continue; }
       if (destino !== 'ALMACEN' && destino !== 'PEP') { errores.push({ itemId, error: 'Destino inválido' }); continue; }
       if (destino === 'PEP' && !destinoRef) { errores.push({ itemId, error: 'PEP requerido' }); continue; }
+      if (destino === 'PEP' && !(await ensurePepAdjudicado(destinoRef))) {
+        errores.push({ itemId, error: 'El PEP de destino no existe o no está adjudicado' });
+        continue;
+      }
 
       const stock = await InventoryStockModel.findOne({ itemId });
       if (!stock || stock.cantidad < cantidad) { errores.push({ itemId, error: `Stock insuficiente (disp: ${stock?.cantidad || 0})` }); continue; }

@@ -1,5 +1,6 @@
 const PersonalModel = require('../../../models/administracion/personal');
 const PersonalHistoryModel = require('../../../models/administracion/personal_history');
+const SeguridadPersonalModel = require('../../../models/seguridad/personal');
 const mongoose = require('mongoose');
 
 const ALLOWED_FIELDS = [
@@ -46,6 +47,9 @@ const normalizeBodyData = (body = {}) => {
 };
 
 const normalizeDni = (dni) => String(dni || '').trim();
+
+/** Valida que el DNI tenga 8 dígitos (DNI peruano). */
+const isValidDni = (dni) => /^\d{8}$/.test(dni);
 
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
@@ -140,6 +144,13 @@ const CreatePersonal = async (req, res) => {
                 message: 'El DNI es obligatorio'
             });
         }
+
+        if (!isValidDni(dni)) {
+            return res.status(400).json({
+                success: false,
+                message: 'El DNI debe tener 8 dígitos'
+            });
+        }
         
         // Validar que no exista un personal con el mismo DNI
         const personalExistente = await PersonalModel.findOne({ 
@@ -217,6 +228,13 @@ const UpdatePersonal = async (req, res) => {
         
         // Si se intenta cambiar el DNI, validar que no exista otro con ese DNI
         if (dni && dni !== personalExistente.dni) {
+            if (!isValidDni(dni)) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'El DNI debe tener 8 dígitos'
+                });
+            }
+
             const personalConDniDuplicado = await PersonalModel.findOne({ 
                 dni,
                 deleted: false,
@@ -295,11 +313,17 @@ const DeletePersonal = async (req, res) => {
         }
         
         console.log('[DeletePersonal] Personal eliminado exitosamente');
-        
+
+        // Coherencia con Seguridad: informar si el personal tenía ficha de seguridad.
+        const tieneFichaSeguridad = await SeguridadPersonalModel.exists({ personalId: id });
+
         return res.status(200).json({
             success: true,
             message: 'Personal eliminado correctamente',
-            data: personalEliminado
+            data: personalEliminado,
+            warnings: tieneFichaSeguridad
+                ? ['Este personal tenía ficha de seguridad; quedó inactiva al eliminarlo.']
+                : []
         });
     } catch (error) {
         console.error('[DeletePersonal] Error:', error.message);

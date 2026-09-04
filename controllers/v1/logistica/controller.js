@@ -3,19 +3,27 @@ const SolpedCounterModel = require('../../../models/logistica/solped_counter');
 const ComercialCBSModel = require('../../../models/comercial/comercial_CBS');
 const ComercialModel = require('../../../models/comercial/comercial');
 const { ACCOUNTING_CATALOG } = require('../../../constants/accounting_catalog');
+const { isLogisticaApprover } = require('../../../services/v1/seguridad/userService');
 
-const AUTH_BYPASS = true;
+// AUTH_BYPASS elimina la autorización por aprobadores (solo para desarrollo puntual).
+const AUTH_BYPASS = false;
 
-const getApproverEmails = () =>
-  (process.env.SOLPED_APPROVER_EMAILS || '')
-    .split(',')
-    .map((mail) => mail.trim().toLowerCase())
-    .filter(Boolean);
-
-const isApprover = (email) => {
+// El aprobador se determina consultando la colección User por email.
+// Ya no se usa SOLPED_APPROVER_EMAILS.
+const isApprover = async (email) => {
   if (AUTH_BYPASS) return true;
-  return getApproverEmails().includes(String(email || '').toLowerCase());
+  return isLogisticaApprover(email);
 };
+
+/**
+ * Obtiene el email del usuario autenticado.
+ * Fuente principal: el token JWT validado (req.user.email, establecido por
+ * authMiddleware). Por compatibilidad con clientes antiguos se acepta el
+ * header x-user-email como respaldo, pero nunca se confía en él por encima
+ * del token.
+ */
+const getAuthEmail = (req) =>
+  String(req.user?.email || req.headers['x-user-email'] || '').trim().toLowerCase();
 
 const getNextSolpedNumber = async () => {
   const year = new Date().getFullYear();
@@ -36,17 +44,65 @@ const extractPepFromElemento = (elementoPEP = '') => {
   return match ? match[1] : '';
 };
 
-const mapItems = (items = []) =>
-  items.map((item, index) => ({
+const IGV_RATE = 0.18;
+
+const toNumber = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+};
+
+/**
+ * Normaliza un ítem de SOLPED y calcula su desglose de IGV.
+ * - Si incluyeIGV=true:  el precioEstimado YA incluye IGV → base = precio/1.18.
+ * - Si incluyeIGV=false: el precioEstimado es sin IGV → se agrega 18%.
+ */
+const mapItem = (item, index) => {
+  const cantidad = Number(item.cantidad || 0);
+  const precioEstimado = Number(item.precioEstimado || 0);
+  const incluyeIGV = item.incluyeIGV === true || item.incluyeIGV === 'true';
+  const importeBruto = cantidad * precioEstimado;
+
+  let importeSinIGV;
+  if (incluyeIGV) {
+    importeSinIGV = importeBruto / (1 + IGV_RATE);
+  } else {
+    importeSinIGV = importeBruto;
+  }
+
+  const igv = importeSinIGV * IGV_RATE;
+
+  return {
     posicion: Number(item.posicion || (index + 1) * 10),
     pep: String(item.pep || '').trim(),
     elementoPEP: String(item.elementoPEP || '').trim(),
     material: String(item.material || '').trim(),
     descripcion: String(item.descripcion || '').trim(),
-    cantidad: Number(item.cantidad || 0),
+    cantidad,
     unidad: String(item.unidad || '').trim(),
-    precioEstimado: Number(item.precioEstimado || 0),
-  }));
+    precioEstimado,
+    incluyeIGV,
+    importeSinIGV: Number(importeSinIGV.toFixed(2)),
+    igv: Number(igv.toFixed(2)),
+  };
+};
+
+const mapItems = (items = []) => items.map(mapItem);
+
+/**
+ * Calcula totales de la SOLPED a partir de sus ítems.
+ * Retorna { totalBase, totalIGV, totalEstimado }.
+ * totalEstimado = total a pagar (base + IGV), con la convención de que si el
+ * ítem "incluye IGV" su precio ya lo contiene (el IGV queda desglosado).
+ */
+const calculateSolpedTotals = (items = []) => {
+  const totalBase = items.reduce((acc, item) => acc + toNumber(item.importeSinIGV), 0);
+  const totalIGV = items.reduce((acc, item) => acc + toNumber(item.igv), 0);
+  return {
+    totalBase: Number(totalBase.toFixed(2)),
+    totalIGV: Number(totalIGV.toFixed(2)),
+    totalEstimado: Number((totalBase + totalIGV).toFixed(2)),
+  };
+};
 
 const validateAccountingClassification = (payload = {}) => {
   const accountingClass = String(payload.accountingClass || '').trim().toUpperCase();
@@ -241,10 +297,9 @@ const GetPepOptions = async (req, res) => {
 
 const CreateSolped = async (req, res) => {
   try {
-    const requesterEmail =
-      String(req.body.requesterEmail || req.headers['x-user-email'] || '')
-        .trim()
-        .toLowerCase();
+    // El solicitante se toma del usuario autenticado (token). El body solo
+    // se usa como respaldo (p. ej. recurrentes que crean SOLPED internamente).
+    const requesterEmail = getAuthEmail(req) || String(req.body.requesterEmail || '').trim().toLowerCase();
 
     const requesterName = String(req.body.requesterName || '').trim();
 
@@ -262,10 +317,13 @@ const CreateSolped = async (req, res) => {
       return res.status(400).json({ success: false, message: enabledValidation.message });
     }
 
-    const totalEstimado = items.reduce(
-      (acc, item) => acc + (Number(item.cantidad) || 0) * (Number(item.precioEstimado) || 0),
-      0,
-    );
+    // Total con desglose de IGV (según incluyeIGV de cada ítem).
+    const { totalBase, totalIGV, totalEstimado } = calculateSolpedTotals(items);
+
+    const moneda = String(req.body.moneda || 'PEN').trim().toUpperCase();
+    if (!['PEN', 'USD'].includes(moneda)) {
+      return res.status(400).json({ success: false, message: 'Moneda debe ser PEN o USD' });
+    }
 
     const status = req.body.submit === true ? 'Pendiente Aprobacion' : 'Borrador';
 
@@ -280,6 +338,7 @@ const CreateSolped = async (req, res) => {
       requesterEmail,
       centro: String(req.body.centro || '').trim(),
       grupoCompra: String(req.body.grupoCompra || '').trim(),
+      moneda,
       accountingClass: accountingValidation.value.accountingClass,
       accountingCategory: accountingValidation.value.accountingCategory,
       accountingSubcategory: accountingValidation.value.accountingSubcategory,
@@ -288,6 +347,8 @@ const CreateSolped = async (req, res) => {
       accountingUpdatedBy: requesterEmail,
       observaciones: String(req.body.observaciones || '').trim(),
       totalEstimado,
+      totalBase,
+      totalIGV,
       status,
       items,
     });
@@ -308,10 +369,8 @@ const CreateSolped = async (req, res) => {
 const UpdateSolped = async (req, res) => {
   try {
     const { id } = req.params;
-    const requesterEmail =
-      String(req.body.requesterEmail || req.headers['x-user-email'] || '')
-        .trim()
-        .toLowerCase();
+    // Email del usuario autenticado (token), autoritativo para autorización.
+    const requesterEmail = getAuthEmail(req);
 
     const solped = await SolpedModel.findOne({ _id: id, deleted: false });
     if (!solped) {
@@ -322,7 +381,7 @@ const UpdateSolped = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No se puede editar una SOLPED aprobada' });
     }
 
-    if (!AUTH_BYPASS && !isApprover(requesterEmail) && solped.requesterEmail !== requesterEmail) {
+    if (!AUTH_BYPASS && !(await isApprover(requesterEmail)) && solped.requesterEmail !== requesterEmail) {
       return res.status(403).json({ success: false, message: 'No autorizado para editar esta SOLPED' });
     }
 
@@ -336,11 +395,6 @@ const UpdateSolped = async (req, res) => {
       return res.status(400).json({ success: false, message: enabledValidation.message });
     }
 
-    const totalEstimado = items.reduce(
-      (acc, item) => acc + (Number(item.cantidad) || 0) * (Number(item.precioEstimado) || 0),
-      0,
-    );
-
     const status = req.body.submit === true ? 'Pendiente Aprobacion' : 'Borrador';
 
     const accountingValidation = validateAccountingClassification(req.body);
@@ -348,8 +402,17 @@ const UpdateSolped = async (req, res) => {
       return res.status(400).json({ success: false, message: accountingValidation.message });
     }
 
+    // Total con desglose de IGV (según incluyeIGV de cada ítem).
+    const totals = calculateSolpedTotals(items);
+
+    const moneda = String(req.body.moneda || solped.moneda || 'PEN').trim().toUpperCase();
+    if (!['PEN', 'USD'].includes(moneda)) {
+      return res.status(400).json({ success: false, message: 'Moneda debe ser PEN o USD' });
+    }
+
     solped.requesterName = String(req.body.requesterName || solped.requesterName || '').trim();
     solped.requesterEmail = requesterEmail || solped.requesterEmail;
+    solped.moneda = moneda;
     solped.accountingClass = accountingValidation.value.accountingClass;
     solped.accountingCategory = accountingValidation.value.accountingCategory;
     solped.accountingSubcategory = accountingValidation.value.accountingSubcategory;
@@ -358,7 +421,9 @@ const UpdateSolped = async (req, res) => {
     solped.accountingUpdatedBy = requesterEmail || 'sistema';
     solped.observaciones = String(req.body.observaciones || '').trim();
     solped.items = items;
-    solped.totalEstimado = totalEstimado;
+    solped.totalEstimado = totals.totalEstimado;
+    solped.totalBase = totals.totalBase;
+    solped.totalIGV = totals.totalIGV;
     solped.status = status;
 
     const saved = await solped.save();
@@ -376,15 +441,13 @@ const UpdateSolped = async (req, res) => {
 
 const GetSolpeds = async (req, res) => {
   try {
-    const email = String(req.headers['x-user-email'] || req.query.email || '')
-      .trim()
-      .toLowerCase();
+    const email = getAuthEmail(req) || String(req.query.email || '').trim().toLowerCase();
 
     const mine = String(req.query.mine || '').toLowerCase() === 'true';
 
     const filter = { deleted: false };
 
-    if (!AUTH_BYPASS && (!isApprover(email) || mine)) {
+    if (!AUTH_BYPASS && (!(await isApprover(email)) || mine)) {
       filter.requesterEmail = email;
     }
 
@@ -399,9 +462,9 @@ const GetSolpeds = async (req, res) => {
 
 const GetApprovalQueue = async (req, res) => {
   try {
-    const email = String(req.headers['x-user-email'] || '').trim().toLowerCase();
+    const email = getAuthEmail(req);
 
-    if (!AUTH_BYPASS && !isApprover(email)) {
+    if (!AUTH_BYPASS && !(await isApprover(email))) {
       return res.status(403).json({ success: false, message: 'No autorizado para aprobar SOLPEDs' });
     }
 
@@ -421,9 +484,9 @@ const GetApprovalQueue = async (req, res) => {
 
 const ApproveSolped = async (req, res) => {
   try {
-    const email = String(req.headers['x-user-email'] || '').trim().toLowerCase();
+    const email = getAuthEmail(req);
 
-    if (!AUTH_BYPASS && !isApprover(email)) {
+    if (!AUTH_BYPASS && !(await isApprover(email))) {
       return res.status(403).json({ success: false, message: 'No autorizado para aprobar SOLPEDs' });
     }
 
@@ -473,8 +536,8 @@ const ApproveSolped = async (req, res) => {
 
 const GetDashboard = async (req, res) => {
   try {
-    const email = String(req.headers['x-user-email'] || '').trim().toLowerCase();
-    const approver = AUTH_BYPASS ? true : isApprover(email);
+    const email = getAuthEmail(req);
+    const approver = AUTH_BYPASS ? true : await isApprover(email);
 
     const baseFilter = { deleted: false };
     if (!approver) baseFilter.requesterEmail = email;

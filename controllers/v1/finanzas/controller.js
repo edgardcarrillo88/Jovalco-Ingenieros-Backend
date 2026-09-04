@@ -5,6 +5,7 @@ const SolpedCounterModel = require('../../../models/logistica/solped_counter');
 const InvoiceModel = require('../../../models/finanzas/invoice');
 const InvoiceCounterModel = require('../../../models/finanzas/invoice_counter');
 const RecurrentPayableModel = require('../../../models/finanzas/recurrent_payable');
+const mongoose = require('mongoose');
 const {
   ACCOUNTING_CLASSES,
   ACCOUNTING_CATALOG,
@@ -40,9 +41,28 @@ const parseBoolean = (value) => {
   return Boolean(value);
 };
 
+const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+
+const { canFinanzasOverride } = require('../../../services/v1/seguridad/userService');
+
 const getUserRole = (req) => String(req.headers['x-user-role'] || req.body?.userRole || '').trim().toLowerCase();
 
-const canOverrideAccounting = (req) => {
+/**
+ * Determina si el usuario puede hacer override contable consultando la
+ * colección User por email (rol finanzas/contabilidad/admin) o, por
+ * compatibilidad, el header x-user-role.
+ */
+const canOverrideAccounting = async (req) => {
+  const email =
+    String(req.user?.email || req.headers['x-user-email'] || '').trim().toLowerCase();
+
+  // Si hay email autenticado, la fuente de verdad es la tabla User.
+  if (email) {
+    const ok = await canFinanzasOverride(email);
+    if (ok) return true;
+  }
+
+  // Compatibilidad: si no hay registro en User pero se envía x-user-role.
   const role = getUserRole(req);
   return ['finanzas', 'contabilidad', 'admin'].includes(role);
 };
@@ -91,8 +111,21 @@ const hasAccountingOverride = (payload = {}) =>
   ['accountingClass', 'accountingCategory', 'accountingSubcategory', 'costCenter', 'loanComponent']
     .some((field) => payload[field] !== undefined);
 
+/**
+ * Obtiene el email del usuario autenticado.
+ * Fuente principal: el token JWT validado (req.user.email). El header
+ * x-user-email o el body solo se usan como respaldo (p. ej. procesos
+ * internos como la generación de SOLPED recurrentes).
+ */
 const getUserEmail = (req) =>
-  String(req.headers['x-user-email'] || req.body?.userEmail || 'sistema').trim().toLowerCase();
+  String(
+    req.user?.email ||
+      req.headers['x-user-email'] ||
+      req.body?.userEmail ||
+      'sistema',
+  )
+    .trim()
+    .toLowerCase();
 
 const getNextInvoiceNumber = async () => {
   const year = new Date().getFullYear();
@@ -223,9 +256,16 @@ const getLastMonths = (count = 6) => {
       mes: `${MONTHS_ES[date.getMonth()]} ${date.getFullYear()}`,
       billed: 0,
       payables: 0,
+      // Desglose por moneda.
+      billedPEN: 0,
+      billedUSD: 0,
+      payablesPEN: 0,
+      payablesUSD: 0,
     };
   });
 };
+
+const currencyOf = (value) => (String(value || 'PEN').trim().toUpperCase() === 'USD' ? 'USD' : 'PEN');
 
 const getInvoiceCandidates = async (req, res) => {
   try {
@@ -422,6 +462,9 @@ const getInvoices = async (req, res) => {
 const updateInvoiceStatus = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
     const status = String(req.body.status || '').trim();
 
     const allowed = ['Pendiente', 'Cobrado', 'Vencido', 'Anulado'];
@@ -473,7 +516,7 @@ const getPayables = async (req, res) => {
     }
 
     const solpeds = await SolpedModel.find(solpedFilter)
-      .select('solpedNumber requesterName requesterEmail totalEstimado paidAmount paymentStatus paymentReference paidAt createdAt source recurrentConcept recurrentCycleDate accountingClass accountingCategory accountingSubcategory costCenter loanComponent cuentaCargo')
+      .select('solpedNumber requesterName requesterEmail moneda totalEstimado totalBase totalIGV paidAmount paymentStatus paymentReference paidAt createdAt source recurrentConcept recurrentCycleDate accountingClass accountingCategory accountingSubcategory costCenter loanComponent cuentaCargo')
       .sort({ createdAt: -1 })
       .lean();
 
@@ -487,8 +530,10 @@ const getPayables = async (req, res) => {
       provider: row.requesterName || row.requesterEmail || 'Solicitante',
       pep: '',
       amount: toNumber(row.totalEstimado),
+      baseAmount: toNumber(row.totalBase ?? row.totalEstimado),
+      igvAmount: toNumber(row.totalIGV),
       paidAmount: toNumber(row.paidAmount),
-      currency: 'PEN',
+      currency: row.moneda || 'PEN',
       accountingClass: row.accountingClass || 'OTHER',
       accountingCategory: row.accountingCategory || 'Sin categoria',
       accountingSubcategory: row.accountingSubcategory || '',
@@ -607,6 +652,9 @@ const getRecurrentPayables = async (req, res) => {
 const toggleRecurrentPayableActive = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
     const isActive = parseBoolean(req.body.isActive);
 
     const row = await RecurrentPayableModel.findOneAndUpdate(
@@ -636,6 +684,9 @@ const toggleRecurrentPayableActive = async (req, res) => {
 const updateRecurrentPayableStatus = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
     const status = String(req.body.status || '').trim();
     const userEmail = getUserEmail(req);
 
@@ -657,7 +708,7 @@ const updateRecurrentPayableStatus = async (req, res) => {
     const paymentReference = String(req.body.paymentReference || '').trim();
     const wantsAccountingOverride = hasAccountingOverride(req.body);
 
-    if (wantsAccountingOverride && !canOverrideAccounting(req)) {
+    if (wantsAccountingOverride && !(await canOverrideAccounting(req))) {
       return res.status(403).json({ success: false, message: 'Solo finanzas/contabilidad puede reclasificar en pago' });
     }
 
@@ -742,6 +793,9 @@ const updateRecurrentPayableStatus = async (req, res) => {
 const updateSolpedPaymentStatus = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
     const status = String(req.body.status || '').trim();
     const userEmail = getUserEmail(req);
 
@@ -764,7 +818,7 @@ const updateSolpedPaymentStatus = async (req, res) => {
     const paymentReference = String(req.body.paymentReference || '').trim();
     const wantsAccountingOverride = hasAccountingOverride(req.body);
 
-    if (wantsAccountingOverride && !canOverrideAccounting(req)) {
+    if (wantsAccountingOverride && !(await canOverrideAccounting(req))) {
       return res.status(403).json({ success: false, message: 'Solo finanzas/contabilidad puede reclasificar en pago' });
     }
 
@@ -853,6 +907,9 @@ const updateSolpedPaymentStatus = async (req, res) => {
 const updateRecurrentPayableById = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
     const userEmail = getUserEmail(req);
     const ALLOWED = [
       'concept', 'category', 'provider', 'pep',
@@ -893,6 +950,9 @@ const updateRecurrentPayableById = async (req, res) => {
 const deleteRecurrentPayableById = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'ID inválido' });
+    }
 
     const row = await RecurrentPayableModel.findOneAndUpdate(
       { _id: id, deleted: { $ne: true } },
@@ -918,7 +978,7 @@ const getPaymentsHistory = async (req, res) => {
 
     const [solpeds, recurrent] = await Promise.all([
       SolpedModel.find({ deleted: false, 'paymentHistory.0': { $exists: true } })
-        .select('solpedNumber requesterName requesterEmail totalEstimado accountingClass accountingCategory accountingSubcategory costCenter loanComponent paymentHistory')
+        .select('solpedNumber requesterName requesterEmail moneda totalEstimado accountingClass accountingCategory accountingSubcategory costCenter loanComponent paymentHistory')
         .lean(),
       RecurrentPayableModel.find({ deleted: { $ne: true }, 'paymentHistory.0': { $exists: true } })
         .select('concept provider category amount currency accountingClass accountingCategory accountingSubcategory costCenter loanComponent paymentHistory')
@@ -934,7 +994,7 @@ const getPaymentsHistory = async (req, res) => {
           concept: `SOLPED ${row.solpedNumber || ''}`.trim(),
           provider: row.requesterName || row.requesterEmail || 'Solicitante',
           totalAmount: toNumber(row.totalEstimado),
-          currency: 'PEN',
+          currency: row.moneda || 'PEN',
           paymentAmount: toNumber(payment.amount),
           paymentDate: payment.paymentDate || payment.createdAt || null,
           paymentReference: payment.reference || '',
@@ -1169,27 +1229,42 @@ const getDashboard = async (req, res) => {
         .sort({ issueDate: -1 })
         .lean(),
       SolpedModel.find({ deleted: false, status: 'Aprobado' })
-        .select('solpedNumber totalEstimado paidAmount paymentStatus createdAt recurrentCycleDate source recurrentConcept')
+        .select('solpedNumber moneda totalEstimado totalBase totalIGV paidAmount paymentStatus createdAt recurrentCycleDate source recurrentConcept')
         .lean(),
       ProjectTrackingModel.find({ 'valuations.0': { $exists: true } })
         .select('valuations.invoiceIssued')
         .lean(),
     ]);
 
-    const totalInvoiced = invoices.reduce((acc, row) => acc + toNumber(row.amount), 0);
-    const totalCollectedAmount = invoices
-      .filter((row) => row.status === 'Cobrado')
-      .reduce((acc, row) => acc + toNumber(row.netAmount || row.amount), 0);
+    // ── Totales por moneda (PEN / USD) ──────────────────────────────
+    const sumByCurrency = (rows, amountFn) =>
+      rows.reduce(
+        (acc, row) => {
+          const moneda = String(row.currency || 'PEN').trim().toUpperCase() === 'USD' ? 'USD' : 'PEN';
+          acc[moneda] += toNumber(amountFn(row));
+          return acc;
+        },
+        { PEN: 0, USD: 0 },
+      );
 
-    const pendingInvoicesRows = invoices.filter((row) => row.status === 'Pendiente' || row.status === 'Vencido');
-    const pendingReceivableAmount = pendingInvoicesRows.reduce((acc, row) => acc + toNumber(row.amount), 0);
+    const totalInvoiced = sumByCurrency(invoices, (row) => row.amount);
+    const totalCollected = sumByCurrency(
+      invoices.filter((row) => row.status === 'Cobrado'),
+      (row) => row.netAmount || row.amount,
+    );
+    const pendingInvoicesRows = invoices.filter(
+      (row) => row.status === 'Pendiente' || row.status === 'Vencido',
+    );
+    const pendingReceivable = sumByCurrency(pendingInvoicesRows, (row) => row.amount);
 
     const payableRows = [
       ...solpedPayables.map((row) => ({
         reference: row.solpedNumber || 'SOLPED',
         amount: toNumber(row.totalEstimado),
+        baseAmount: toNumber(row.totalBase ?? row.totalEstimado),
+        igvAmount: toNumber(row.totalIGV),
         paidAmount: toNumber(row.paidAmount),
-        currency: 'PEN',
+        currency: row.moneda || 'PEN',
         dueDate: row.recurrentCycleDate || row.createdAt,
         status: row.paymentStatus || 'Pendiente',
         source: 'SOLPED',
@@ -1197,10 +1272,12 @@ const getDashboard = async (req, res) => {
     ];
 
     const openPayablesRows = payableRows.filter((row) => row.status !== 'Pagado');
-    const openPayablesAmount = openPayablesRows.reduce(
-      (acc, row) => acc + Math.max(toNumber(row.amount) - toNumber(row.paidAmount), 0),
-      0,
+    const openPayables = sumByCurrency(openPayablesRows, (row) =>
+      Math.max(toNumber(row.amount) - toNumber(row.paidAmount), 0),
     );
+
+    const totalInvoicedAmount = totalInvoiced.PEN + totalInvoiced.USD;
+    const openPayablesAmount = openPayables.PEN + openPayables.USD;
 
     const payableStatusBuckets = payableRows.reduce(
       (acc, row) => {
@@ -1218,7 +1295,10 @@ const getDashboard = async (req, res) => {
       if (!issueDate) return;
       const target = monthMap.get(getMonthKey(issueDate));
       if (target) {
-        target.billed += toNumber(row.amount);
+        const monto = toNumber(row.amount);
+        target.billed += monto;
+        if (currencyOf(row.currency) === 'USD') target.billedUSD += monto;
+        else target.billedPEN += monto;
       }
     });
 
@@ -1227,7 +1307,10 @@ const getDashboard = async (req, res) => {
       if (!dueDate) return;
       const target = monthMap.get(getMonthKey(dueDate));
       if (target) {
-        target.payables += toNumber(row.amount);
+        const monto = toNumber(row.amount);
+        target.payables += monto;
+        if (currencyOf(row.currency) === 'USD') target.payablesUSD += monto;
+        else target.payablesPEN += monto;
       }
     });
 
@@ -1268,6 +1351,11 @@ const getDashboard = async (req, res) => {
       billed: toNumber(row.billed),
       payables: toNumber(row.payables),
       net: toNumber(row.billed) - toNumber(row.payables),
+      // Desglose por moneda.
+      billedPEN: toNumber(row.billedPEN),
+      billedUSD: toNumber(row.billedUSD),
+      payablesPEN: toNumber(row.payablesPEN),
+      payablesUSD: toNumber(row.payablesUSD),
     }));
 
     const invoiceTaxRows = invoices
@@ -1297,12 +1385,24 @@ const getDashboard = async (req, res) => {
       data: {
         totalInvoices: invoices.length,
         pendingInvoices: pendingInvoicesRows.length,
-        totalInvoicedAmount: totalInvoiced,
-        totalCollectedAmount,
-        pendingReceivableAmount,
+        // Compatibilidad: totales agregados (suma de PEN + USD).
+        totalInvoicedAmount,
+        totalCollectedAmount: totalCollected.PEN + totalCollected.USD,
+        pendingReceivableAmount: pendingReceivable.PEN + pendingReceivable.USD,
         openPayablesCount: openPayablesRows.length,
         openPayablesAmount,
-        netFlow: totalInvoiced - openPayablesAmount,
+        netFlow: totalInvoicedAmount - openPayablesAmount,
+        // Desglose por moneda (para mostrar KPIs separados en el frontend).
+        byCurrency: {
+          totalInvoiced: totalInvoiced,
+          totalCollected: totalCollected,
+          pendingReceivable: pendingReceivable,
+          openPayables,
+          netFlow: {
+            PEN: toNumber((totalInvoiced.PEN - openPayables.PEN).toFixed(2)),
+            USD: toNumber((totalInvoiced.USD - openPayables.USD).toFixed(2)),
+          },
+        },
         pendingValuationCount,
         monthlySeries,
         payableStatusSeries,

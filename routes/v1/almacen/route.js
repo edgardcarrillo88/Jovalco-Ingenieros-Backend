@@ -1,7 +1,13 @@
 const express = require('express');
 const router = express.Router();
-const controller = require('../../../controllers/v1/almacen/controller');
+const controller = require('../../../controllers/v1/almacen/controller');const authMiddleware = require('../../../middleware/v1/auth');
 
+// El módulo almacén requiere autenticación (Bearer token de NextAuth).
+// Se permite OPTIONS para el preflight de CORS.
+router.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return next();
+  return authMiddleware(req, res, next);
+});
 // Categorías
 router.get('/almacen/categories', controller.listCategories);
 router.post('/almacen/categories', controller.createCategory);

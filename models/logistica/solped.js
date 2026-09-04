@@ -10,6 +10,11 @@ const SolpedItemSchema = mongoose.Schema(
     cantidad: Number,
     unidad: String,
     precioEstimado: Number,
+    // IGV por ítem: indica si el precioEstimado YA incluye IGV (true) o no (false).
+    incluyeIGV: { type: Boolean, default: false },
+    // Montos calculados por ítem (base sin IGV y monto de IGV).
+    importeSinIGV: { type: Number, default: 0 },
+    igv: { type: Number, default: 0 },
     almacen: String,
     centro: String,
   },
@@ -23,6 +28,8 @@ const SolpedSchema = mongoose.Schema(
     requesterEmail: { type: String, index: true },
     centro: String,
     grupoCompra: String,
+    // Moneda de la SOLPED (PEN por defecto). Se propaga a Finanzas.
+    moneda: { type: String, enum: ['PEN', 'USD'], default: 'PEN', trim: true, index: true },
     accountingClass: { type: String, default: 'OTHER', index: true },
     accountingCategory: { type: String, default: '', trim: true, index: true },
     accountingSubcategory: { type: String, default: '', trim: true },
@@ -34,7 +41,10 @@ const SolpedSchema = mongoose.Schema(
     },
     accountingUpdatedBy: { type: String, default: 'sistema', trim: true },
     observaciones: String,
+    // totalEstimado = total a pagar (incluye IGV). Desglose en totalBase/totalIGV.
     totalEstimado: { type: Number, default: 0 },
+    totalBase: { type: Number, default: 0 },
+    totalIGV: { type: Number, default: 0 },
     status: {
       type: String,
       enum: ['Borrador', 'Pendiente Aprobacion', 'Aprobado', 'Rechazado'],

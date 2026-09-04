@@ -20,7 +20,14 @@ const MONTHS_ES = [
 ];
 
 const getUserEmail = (req) =>
-  String(req.headers["x-user-email"] || req.body?.userEmail || "sistema").toLowerCase();
+  String(
+    req.user?.email ||
+      req.headers["x-user-email"] ||
+      req.body?.userEmail ||
+      "sistema",
+  )
+    .trim()
+    .toLowerCase();
 
 const parseDateOrNull = (value) => {
   if (!value) return null;

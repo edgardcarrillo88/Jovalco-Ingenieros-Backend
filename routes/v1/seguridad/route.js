@@ -1,6 +1,20 @@
 const express = require('express');
 const router = express.Router();
 const controller = require('../../../controllers/v1/seguridad/controller');
+const userController = require('../../../controllers/v1/seguridad/userController');
+const authMiddleware = require('../../../middleware/v1/auth');
+
+// El módulo seguridad requiere autenticación (Bearer token de NextAuth).
+// Se permite OPTIONS para el preflight de CORS.
+router.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return next();
+  return authMiddleware(req, res, next);
+});
+
+// Gestión de usuarios (tabla User)
+router.get('/seguridad/users', userController.listUsers);
+router.post('/seguridad/users', userController.createUser);
+router.patch('/seguridad/users/:id', userController.updateUser);
 
 // Dashboard
 router.get('/seguridad/dashboard', controller.getDashboard);
