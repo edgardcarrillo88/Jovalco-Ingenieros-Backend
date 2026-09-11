@@ -276,4 +276,138 @@ describe("Estadísticas", () => {
     expect(res.body.data.totalPersonal).toBe(1);
     expect(res.body.data.personalPorArea.length).toBe(1);
   });
+
+  test("suma el gasto mensual de planilla excluyendo a los cesados", async () => {
+    await request(app)
+      .post("/api/v1/administracion/createpersonal")
+      .set("Authorization", `Bearer ${token}`)
+      .send(
+        payloadPersonalValido({
+          dni: "77777777",
+          sueldoPlanilla: 1000,
+          sueldoRh: 500,
+        }),
+      );
+
+    await request(app)
+      .post("/api/v1/administracion/createpersonal")
+      .set("Authorization", `Bearer ${token}`)
+      .send(
+        payloadPersonalValido({
+          dni: "88888888",
+          sueldoPlanilla: 2000,
+          sueldoRh: 250,
+        }),
+      );
+
+    await request(app)
+      .post("/api/v1/administracion/createpersonal")
+      .set("Authorization", `Bearer ${token}`)
+      .send(
+        payloadPersonalValido({
+          dni: "99999999",
+          estado: "Cesado",
+          sueldoPlanilla: 9000,
+          sueldoRh: 9000,
+        }),
+      );
+
+    const res = await request(app)
+      .get("/api/v1/administracion/getestadisticas")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    // 1500 + 2250 = 3750 (el cesado no se suma)
+    expect(res.body.data.gastoPlanilla).toBe(3750);
+    expect(res.body.data.personalConsiderado).toBe(2);
+  });
+});
+
+describe("Estado contractual derivado", () => {
+  test("marca Vencido en el listado cuando la fecha de vencimiento ya pasó", async () => {
+    // Contrato vencido: ingreso hace mucho tiempo + tiempo de contrato corto.
+    const vencido = await request(app)
+      .post("/api/v1/administracion/createpersonal")
+      .set("Authorization", `Bearer ${token}`)
+      .send(
+        payloadPersonalValido({
+          dni: "33333333",
+          fechaIngreso: "2025-02-15T00:00:00.000Z",
+          tiempoContrato: 15,
+          estado: "Próximo a vencer", // estado obsoleto guardado
+        }),
+      );
+
+    const list = await request(app)
+      .get("/api/v1/administracion/getpersonal")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(list.status).toBe(200);
+    expect(list.body.data[0].estado).toBe("Vencido");
+    // La respuesta también expone la fecha de vencimiento usada para derivarlo.
+    expect(list.body.data[0].fechaVencimientoContrato).toBeTruthy();
+
+    // El valor obsoleto no debe persistirse en la base de datos.
+    const enBase = await PersonalModel.findById(vencido.body.data._id).lean();
+    expect(enBase.estado).toBe("Próximo a vencer");
+  });
+
+  test("marca Vigente cuando el vencimiento está lejos y respeta Cesado", async () => {
+    const futuro = new Date();
+    futuro.setFullYear(futuro.getFullYear() + 3);
+
+    await request(app)
+      .post("/api/v1/administracion/createpersonal")
+      .set("Authorization", `Bearer ${token}`)
+      .send(
+        payloadPersonalValido({
+          dni: "44444444",
+          fechaIngreso: futuro.toISOString(),
+          tiempoContrato: 12,
+        }),
+      );
+
+    await request(app)
+      .post("/api/v1/administracion/createpersonal")
+      .set("Authorization", `Bearer ${token}`)
+      .send(
+        payloadPersonalValido({
+          dni: "55555555",
+          fechaIngreso: "2024-01-01T00:00:00.000Z",
+          tiempoContrato: 12,
+          estado: "Cesado",
+        }),
+      );
+
+    const list = await request(app)
+      .get("/api/v1/administracion/getpersonal")
+      .set("Authorization", `Bearer ${token}`);
+
+    const estados = list.body.data.map((p) => p.estado);
+    expect(estados).toContain("Vigente");
+    expect(estados).toContain("Cesado");
+  });
+
+  test("agrupa las estadísticas por estado derivado", async () => {
+    await request(app)
+      .post("/api/v1/administracion/createpersonal")
+      .set("Authorization", `Bearer ${token}`)
+      .send(
+        payloadPersonalValido({
+          dni: "66666666",
+          fechaIngreso: "2025-02-15T00:00:00.000Z",
+          tiempoContrato: 15,
+          estado: "Próximo a vencer",
+        }),
+      );
+
+    const res = await request(app)
+      .get("/api/v1/administracion/getestadisticas")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.personalPorEstado).toEqual([
+      { _id: "Vencido", cantidad: 1 },
+    ]);
+  });
 });

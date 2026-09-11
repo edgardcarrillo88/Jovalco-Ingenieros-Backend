@@ -1,6 +1,7 @@
 const PersonalModel = require('../../../models/administracion/personal');
 const PersonalHistoryModel = require('../../../models/administracion/personal_history');
 const SeguridadPersonalModel = require('../../../models/seguridad/personal');
+const personalService = require('../../../services/v1/administracion/personalService');
 const mongoose = require('mongoose');
 
 const ALLOWED_FIELDS = [
@@ -62,9 +63,8 @@ const GetPersonal = async (req, res) => {
     try {
         console.log('[GetPersonal] Obteniendo lista de personal...');
         
-        const personal = await PersonalModel.find({ deleted: false })
-            .sort({ createdAt: -1 })
-            .lean();
+        // El estado contractual se deriva al leer (no se persiste).
+        const personal = await personalService.listarPersonal();
         
         console.log(`[GetPersonal] Se encontraron ${personal.length} registros de personal`);
         
@@ -101,7 +101,7 @@ const GetPersonalById = async (req, res) => {
             });
         }
         
-        const personal = await PersonalModel.findOne({ _id: id, deleted: false }).lean();
+        const personal = await personalService.obtenerPersonalPorId(id);
         
         if (!personal) {
             return res.status(404).json({
@@ -181,7 +181,7 @@ const CreatePersonal = async (req, res) => {
         return res.status(201).json({
             success: true,
             message: 'Personal creado correctamente',
-            data: personalGuardado
+            data: personalService.withEstadoContrato(personalGuardado.toObject())
         });
     } catch (error) {
         console.error('[CreatePersonal] Error:', error.message);
@@ -270,6 +270,8 @@ const UpdatePersonal = async (req, res) => {
             success: true,
             message: 'Personal actualizado correctamente',
             data: personalActualizado
+                ? personalService.withEstadoContrato(personalActualizado.toObject())
+                : personalActualizado
         });
     } catch (error) {
         console.error('[UpdatePersonal] Error:', error.message);
@@ -343,36 +345,16 @@ const GetEstadisticas = async (req, res) => {
     try {
         console.log('[GetEstadisticas] Obteniendo estadísticas de personal...');
         
-        const totalPersonal = await PersonalModel.countDocuments({ deleted: false });
-        
-        const personalPorArea = await PersonalModel.aggregate([
-            { $match: { deleted: false } },
-            { $group: { _id: '$area', cantidad: { $sum: 1 } } },
-            { $sort: { cantidad: -1 } }
-        ]);
-        
-        const personalPorCargo = await PersonalModel.aggregate([
-            { $match: { deleted: false } },
-            { $group: { _id: '$cargo', cantidad: { $sum: 1 } } },
-            { $sort: { cantidad: -1 } }
-        ]);
-        
-        const personalPorEstado = await PersonalModel.aggregate([
-            { $match: { deleted: false } },
-            { $group: { _id: '$estado', cantidad: { $sum: 1 } } }
-        ]);
+        // La distribución por estado usa el estado contractual derivado,
+        // igual que el listado de personal.
+        const estadisticas = await personalService.obtenerEstadisticasPersonal();
         
         console.log('[GetEstadisticas] Estadísticas obtenidas correctamente');
         
         return res.status(200).json({
             success: true,
             message: 'Estadísticas obtenidas correctamente',
-            data: {
-                totalPersonal,
-                personalPorArea,
-                personalPorCargo,
-                personalPorEstado
-            }
+            data: estadisticas
         });
     } catch (error) {
         console.error('[GetEstadisticas] Error:', error.message);
