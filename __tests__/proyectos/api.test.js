@@ -20,6 +20,8 @@ const ComercialModel = require("../../models/comercial/comercial");
 const ComercialCBSModel = require("../../models/comercial/comercial_CBS");
 const SolpedModel = require("../../models/logistica/solped");
 const ProjectTrackingModel = require("../../models/proyectos/project_tracking");
+const ItemModel = require("../../models/almacen/item");
+const MovementModel = require("../../models/almacen/movement");
 
 const TEST_SECRET = "test-jwt-secret-proyectos-2026";
 const PEP = "J.2026.001/001";
@@ -163,6 +165,127 @@ describe("Listado y detalle de proyectos (integración Comercial)", () => {
     const elem01 = res.body.data.estructura.find((e) => e.ElementoPEP === `${PEP}.01`);
     expect(elem01).toBeTruthy();
     expect(elem01.Real).toBe(200);
+  });
+
+  test("el 'real' suma también las salidas de almacén imputadas al PEP", async () => {
+    await seedProyectoAdjudicado();
+
+    // SOLPED aprobada que aporta 200 al elemento .01
+    await SolpedModel.create({
+      solpedNumber: "SOLPED-2026-0001",
+      requesterEmail: "solicitante@correo.com",
+      status: "Aprobado",
+      items: [{ pep: PEP, elementoPEP: `${PEP}.01`, cantidad: 2, precioEstimado: 100 }],
+    });
+
+    // Salida de almacén al mismo elemento: 3 unidades a S/ 50 = 150
+    const item = await ItemModel.create({
+      codigo: "MAT-0001",
+      nombre: "Cable de prueba",
+      categoria: "Cables",
+      tipo: "Componente",
+      costoUnitario: 50,
+    });
+    await MovementModel.create({
+      tipo: "SALIDA",
+      itemId: item._id,
+      cantidad: 3,
+      costoUnitario: 50,
+      monto: 150,
+      destino: "PEP",
+      destinoRef: PEP,
+      elementoPEP: `${PEP}.01`,
+      usuario: "almacen@jovalco.com",
+    });
+
+    const res = await request(app)
+      .get(`/api/v1/proyectos/projects/${encodeURIComponent(PEP)}`)
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    const elem01 = res.body.data.estructura.find((e) => e.ElementoPEP === `${PEP}.01`);
+    // 200 (SOLPED) + 150 (almacén) = 350
+    expect(elem01.Real).toBe(350);
+  });
+
+  test("no suma al 'real' las salidas de almacén sin destino PEP", async () => {
+    await seedProyectoAdjudicado();
+
+    const item = await ItemModel.create({
+      codigo: "MAT-0002",
+      nombre: "Item interno",
+      categoria: "General",
+      tipo: "Componente",
+    });
+    // Salida a ALMACEN (no imputada a ningún proyecto).
+    await MovementModel.create({
+      tipo: "SALIDA",
+      itemId: item._id,
+      cantidad: 5,
+      costoUnitario: 10,
+      monto: 50,
+      destino: "ALMACEN",
+      destinoRef: "ALMACEN",
+    });
+
+    const res = await request(app)
+      .get(`/api/v1/proyectos/projects/${encodeURIComponent(PEP)}`)
+      .set("Authorization", `Bearer ${token}`);
+
+    const elem01 = res.body.data.estructura.find((e) => e.ElementoPEP === `${PEP}.01`);
+    expect(elem01.Real).toBe(0);
+  });
+
+  test("el detalle del real lista SOLPED y almacén con totales", async () => {
+    await seedProyectoAdjudicado();
+
+    await SolpedModel.create({
+      solpedNumber: "SOLPED-2026-0007",
+      requesterEmail: "solicitante@correo.com",
+      status: "Aprobado",
+      moneda: "PEN",
+      items: [{ pep: PEP, elementoPEP: `${PEP}.01`, cantidad: 2, precioEstimado: 100, descripcion: "Servicio" }],
+    });
+
+    const item = await ItemModel.create({
+      codigo: "MAT-0003",
+      nombre: "Material de obra",
+      categoria: "Obra",
+      tipo: "Componente",
+    });
+    await MovementModel.create({
+      tipo: "SALIDA",
+      itemId: item._id,
+      cantidad: 4,
+      costoUnitario: 25,
+      monto: 100,
+      destino: "PEP",
+      destinoRef: PEP,
+      elementoPEP: `${PEP}.01`,
+    });
+
+    const res = await request(app)
+      .get(`/api/v1/proyectos/projects/${encodeURIComponent(PEP)}/real`)
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.pep).toBe(PEP);
+    expect(res.body.data.movimientos.length).toBe(2);
+
+    const origenes = res.body.data.movimientos.map((m) => m.source).sort();
+    expect(origenes).toEqual(["almacen", "solped"]);
+
+    // Totales por moneda y por elemento (200 + 100).
+    expect(res.body.data.totalesPorMoneda.PEN).toBe(300);
+    expect(res.body.data.totalesPorElemento[`${PEP}.01`]).toBe(300);
+  });
+
+  test("el detalle del real devuelve 404 para un proyecto inexistente", async () => {
+    const res = await request(app)
+      .get("/api/v1/proyectos/projects/J.2026.999/999/real")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.status).toBe(404);
   });
 
   test("detalle de proyecto inexistente devuelve 404", async () => {

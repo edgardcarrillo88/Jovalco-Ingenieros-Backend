@@ -14,6 +14,8 @@ router.use((req, res, next) => {
 router.get("/proyectos/projects", controller.getProjects);
 router.get("/proyectos/gantt-template", controller.downloadGanttTemplate);
 router.get("/proyectos/projects/:pep", controller.getProjectDetail);
+// Detalle del "real" ejecutado (SOLPED aprobadas + retiros de almacén al PEP).
+router.get("/proyectos/projects/:pep/real", controller.getProjectRealDetail);
 router.get("/proyectos/projects/:pep/valuations/template", controller.downloadValuationTemplate);
 router.post("/proyectos/projects/:pep/history", controller.addHistoryEntry);
 router.post("/proyectos/projects/:pep/activities", controller.addActivity);

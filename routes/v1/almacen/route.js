@@ -19,6 +19,8 @@ router.put('/almacen/items/:id', controller.updateItem);
 
 // Stock
 router.get('/almacen/stock', controller.getStock);
+// Lotes (ingresos) de un material, para elegir de qué lote se retira stock.
+router.get('/almacen/lotes', controller.getLotes);
 
 // Movimientos (ingreso/salida/kardex)
 router.post('/almacen/stock/ingreso', controller.registerIngreso);

@@ -2,7 +2,8 @@ const mongoose = require('mongoose');
 
 const InventoryItemSchema = new mongoose.Schema(
   {
-    codigo: { type: String, trim: true, default: '' },
+    // Código de material autogenerado (MAT-0001) cuando no se informa uno.
+    codigo: { type: String, trim: true, default: '', index: true },
     nombre: { type: String, required: true, trim: true },
     categoria: { type: String, required: true, trim: true, index: true },
     tipo: {
@@ -10,6 +11,7 @@ const InventoryItemSchema = new mongoose.Schema(
       enum: ['Componente', 'Fabricado', 'Herramienta'],
       default: 'Componente',
     },
+    // Costo unitario base del item: se actualiza con el último costo de ingreso.
     costoUnitario: { type: Number, default: 0, min: 0 },
     stockSeguridad: { type: Number, default: 0, min: 0 },
     fechaCalibracion: { type: Date, default: null },

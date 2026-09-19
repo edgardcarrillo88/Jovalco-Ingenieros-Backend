@@ -3,6 +3,8 @@ const ComercialModel = require("../../../models/comercial/comercial");
 const ComercialCBSModel = require("../../../models/comercial/comercial_CBS");
 const ProjectTrackingModel = require("../../../models/proyectos/project_tracking");
 const SolpedModel = require("../../../models/logistica/solped");
+const InventoryMovementModel = require("../../../models/almacen/movement");
+const InventoryItemModel = require("../../../models/almacen/item");
 
 const MONTHS_ES = [
   "Ene",
@@ -104,16 +106,27 @@ const buildTrackingSeed = (pep, project) => ({
   state: project.Estado || "",
 });
 
-const getApprovedRealByElemento = async (pep) => {
+// Origen de un movimiento que compone el "real" ejecutado del proyecto.
+const REAL_SOURCE = {
+  SOLPED: "solped",
+  ALMACEN: "almacen",
+};
+
+/**
+ * Detalle del "real" aportado por las SOLPED aprobadas del proyecto.
+ * Cada ítem de SOLPED que apunte al PEP se imputa a su elemento PEP.
+ * El monto es cantidad × precioEstimado (misma convención que el total).
+ */
+const getApprovedSolpedDetail = async (pep) => {
   const approvedSolpeds = await SolpedModel.find({
     deleted: { $ne: true },
     status: "Aprobado",
     "items.pep": pep,
   })
-    .select("items")
+    .select("solpedNumber moneda status items approvedAt createdAt")
     .lean();
 
-  const realByElemento = new Map();
+  const detail = [];
 
   for (const solped of approvedSolpeds) {
     for (const item of solped.items || []) {
@@ -122,12 +135,98 @@ const getApprovedRealByElemento = async (pep) => {
       const elemento = String(item.elementoPEP || "").trim();
       if (!elemento) continue;
 
-      const real = toNumber(item.cantidad) * toNumber(item.precioEstimado);
-      realByElemento.set(elemento, toNumber(realByElemento.get(elemento)) + real);
+      const cantidad = toNumber(item.cantidad);
+      const precioUnitario = toNumber(item.precioEstimado);
+
+      detail.push({
+        source: REAL_SOURCE.SOLPED,
+        referencia: solped.solpedNumber || "",
+        elementoPEP: elemento,
+        descripcion: String(item.descripcion || "").trim(),
+        material: String(item.material || "").trim(),
+        cantidad,
+        precioUnitario,
+        monto: cantidad * precioUnitario,
+        moneda: String(solped.moneda || "PEN").trim() || "PEN",
+        estado: String(solped.status || "").trim(),
+        fecha: solped.approvedAt || solped.updatedAt || solped.createdAt || null,
+      });
     }
   }
 
-  return realByElemento;
+  return detail;
+};
+
+/**
+ * Detalle del "real" aportado por almacén: las SALIDAS de stock imputadas al
+ * proyecto (destino PEP). Representan material realmente consumido por el
+ * proyecto y se valorizan al costo unitario del lote retirado.
+ */
+const getAlmacenRealDetail = async (pep) => {
+  const salidas = await InventoryMovementModel.find({
+    tipo: "SALIDA",
+    destino: "PEP",
+    destinoRef: pep,
+  })
+    .select("itemId cantidad costoUnitario monto comentarios usuario createdAt elementoPEP")
+    .sort({ createdAt: -1 })
+    .lean();
+
+  if (salidas.length === 0) return [];
+
+  const itemIds = [...new Set(salidas.map((s) => String(s.itemId)).filter(Boolean))];
+  const items = await InventoryItemModel.find({ _id: { $in: itemIds } })
+    .select("codigo nombre categoria tipo")
+    .lean();
+
+  const itemMap = new Map(items.map((i) => [String(i._id), i]));
+
+  return salidas.map((salida) => {
+    const item = itemMap.get(String(salida.itemId));
+    const cantidad = toNumber(salida.cantidad);
+    const costoUnitario = toNumber(salida.costoUnitario);
+
+    return {
+      source: REAL_SOURCE.ALMACEN,
+      referencia: item?.codigo || "",
+      elementoPEP: String(salida.elementoPEP || "").trim(),
+      descripcion: item?.nombre || "",
+      material: item?.codigo || "",
+      categoria: item?.categoria || "",
+      cantidad,
+      precioUnitario: costoUnitario,
+      // El monto del movimiento es la fuente; se recalcula si viniera vacío.
+      monto: toNumber(salida.monto) || cantidad * costoUnitario,
+      moneda: "PEN",
+      estado: "",
+      usuario: salida.usuario || "sistema",
+      comentarios: salida.comentarios || "",
+      fecha: salida.createdAt || null,
+    };
+  });
+};
+
+/**
+ * Construye el conjunto de movimientos que componen el "real" del proyecto
+ * (SOLPED aprobadas + salidas de almacén al PEP) y el mapa de totales por
+ * elemento PEP, que es lo que alimenta la columna Real de la estructura.
+ */
+const getRealDetail = async (pep) => {
+  const [solpedDetail, almacenDetail] = await Promise.all([
+    getApprovedSolpedDetail(pep),
+    getAlmacenRealDetail(pep),
+  ]);
+
+  const movimientos = [...solpedDetail, ...almacenDetail];
+
+  const realByElemento = new Map();
+  movimientos.forEach((movimiento) => {
+    const elemento = movimiento.elementoPEP;
+    if (!elemento) return;
+    realByElemento.set(elemento, toNumber(realByElemento.get(elemento)) + movimiento.monto);
+  });
+
+  return { movimientos, realByElemento };
 };
 
 const getProjectStructureData = async (pep) => {
@@ -149,7 +248,7 @@ const getProjectStructureData = async (pep) => {
     .sort({ Nivel: 1, ElementoPEP: 1 })
     .lean();
 
-  const realByElemento = await getApprovedRealByElemento(pep);
+  const { realByElemento } = await getRealDetail(pep);
 
   const structureRows = structureRowsRaw
     .map((row) => {
@@ -422,12 +521,67 @@ const getProjectDetail = async (req, res) => {
   }
 };
 
+/**
+ * Detalle del "real" ejecutado de un proyecto.
+ * Lista cada movimiento que compone el real (SOLPED aprobadas y retiros de
+ * almacén imputados al PEP) y los totales por elemento PEP y por moneda.
+ */
+const getProjectRealDetail = async (req, res) => {
+  try {
+    const pep = String(req.params.pep || "").trim();
+
+    if (!pep) {
+      return res.status(400).json({ message: "PEP es requerido" });
+    }
+
+    const project = await ComercialModel.findOne({
+      PEP: pep,
+      deleted: { $ne: true },
+    })
+      .select("PEP Descripcion Moneda")
+      .lean();
+
+    if (!project) {
+      return res.status(404).json({ message: "Proyecto no encontrado" });
+    }
+
+    const { movimientos } = await getRealDetail(pep);
+
+    // Totales por moneda y por elemento PEP, para el resumen del modal.
+    const totalesPorMoneda = {};
+    const totalesPorElemento = {};
+
+    movimientos.forEach((movimiento) => {
+      const moneda = movimiento.moneda || "PEN";
+      totalesPorMoneda[moneda] = toNumber(totalesPorMoneda[moneda]) + movimiento.monto;
+
+      const elemento = movimiento.elementoPEP;
+      if (!elemento) return;
+      totalesPorElemento[elemento] = toNumber(totalesPorElemento[elemento]) + movimiento.monto;
+    });
+
+    return res.status(200).json({
+      message: "Detalle del real obtenido correctamente",
+      data: {
+        pep,
+        nombre: project.Descripcion || "Sin nombre",
+        moneda: project.Moneda || "PEN",
+        movimientos,
+        totalesPorMoneda,
+        totalesPorElemento,
+      },
+    });
+  } catch (error) {
+    console.log(error);
+    res.status(500).json({ message: "Error al obtener el detalle del real" });
+  }
+};
+
 const addHistoryEntry = async (req, res) => {
   try {
     const pep = String(req.params.pep || "").trim();
     const kind = String(req.body.kind || "").trim().toLowerCase();
     const title = String(req.body.title || "").trim();
-
     if (!pep) return res.status(400).json({ message: "PEP es requerido" });
     if (!kind || !["reporte", "hito", "riesgo"].includes(kind)) {
       return res.status(400).json({ message: "Tipo de historial inválido" });
@@ -1072,6 +1226,7 @@ const createValuationFromExcel = async (req, res) => {
 module.exports = {
   getProjects,
   getProjectDetail,
+  getProjectRealDetail,
   addHistoryEntry,
   addActivity,
   updateActivity,

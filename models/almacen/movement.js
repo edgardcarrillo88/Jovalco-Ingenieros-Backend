@@ -17,12 +17,21 @@ const InventoryMovementSchema = new mongoose.Schema(
     cantidad: { type: Number, required: true, min: 0 },
     costoUnitario: { type: Number, default: 0, min: 0 },
     monto: { type: Number, default: 0, min: 0 },
+    // En las SALIDAS, lote (ingreso) del que se retiró el stock.
+    batchId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'InventoryBatch',
+      default: null,
+    },
     destino: {
       type: String,
       enum: ['ALMACEN', 'PEP'],
       required: true,
     },
+    // Cuando el destino es PEP, destinoRef guarda el PEP y elementoPEP el
+    // elemento PEP habilitado al que se imputa el movimiento.
     destinoRef: { type: String, default: 'ALMACEN', trim: true },
+    elementoPEP: { type: String, default: '', trim: true },
     comentarios: { type: String, default: '', trim: true },
     categoria: { type: String, default: '', trim: true },
     usuario: { type: String, default: 'sistema', trim: true },

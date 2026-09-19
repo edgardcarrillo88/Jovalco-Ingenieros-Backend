@@ -2,12 +2,26 @@ const InventoryItemModel = require('../../../models/almacen/item');
 const InventoryStockModel = require('../../../models/almacen/stock');
 const InventoryMovementModel = require('../../../models/almacen/movement');
 const InventoryCategoryModel = require('../../../models/almacen/category');
-const ComercialModel = require('../../../models/comercial/comercial');
+const InventoryBatchModel = require('../../../models/almacen/batch');
+const almacenService = require('../../../services/v1/almacen/service');
+const { ServiceError } = require('../../../services/v1/almacen/errors');
 const mongoose = require('mongoose');
 
-const toNumber = (v) => {
-  const n = Number(v);
+const toNumber = (value) => {
+  const n = Number(value);
   return Number.isFinite(n) ? Math.max(n, 0) : 0;
+};
+
+/**
+ * Traduce los errores de negocio del service a respuestas HTTP.
+ * Los errores inesperados se registran y responden 500.
+ */
+const handleServiceError = (res, error, fallbackMessage) => {
+  if (error instanceof ServiceError) {
+    return res.status(error.status).json({ success: false, message: error.message });
+  }
+  console.error(fallbackMessage, error.message);
+  return res.status(500).json({ success: false, message: fallbackMessage });
 };
 
 /**
@@ -27,36 +41,16 @@ const getEmail = (req) =>
 
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
-/**
- * Valida que un PEP exista y esté adjudicado en el módulo Comercial.
- * Interacción Almacén ↔ Comercial: los movimientos con destino PEP deben
- * apuntar a un proyecto adjudicado (misma regla que usa Logística).
- */
-const ensurePepAdjudicado = async (pep) => {
-  const pepLimpio = String(pep || '').trim();
-  if (!pepLimpio) return false;
-
-  const found = await ComercialModel.findOne({
-    deleted: { $ne: true },
-    PEP: pepLimpio,
-    Estado: { $regex: '^\\s*adjudicado\\s*$', $options: 'i' },
-  })
-    .select('_id')
-    .lean();
-
-  return Boolean(found);
-};
-
 // ─── Categorías ──────────────────────────────────────────────────────────────
 
 const listCategories = async (req, res) => {
   try {
-    const q = String(req.query.q || '').trim().toLowerCase();
+    const q = String(req.query.q || '').trim();
     const filter = { deleted: false };
-    if (q) filter.nombre = { $regex: q, $options: 'i' };
+    if (q) filter.nombre = { $regex: almacenService.escapeRegExp(q), $options: 'i' };
 
     const rows = await InventoryCategoryModel.find(filter)
-      .select('nombre costoUnitario personalizada')
+      .select('nombre personalizada')
       .sort({ nombre: 1 })
       .lean();
 
@@ -72,11 +66,10 @@ const createCategory = async (req, res) => {
     const nombre = String(req.body.nombre || '').trim();
     if (!nombre) return res.status(400).json({ success: false, message: 'Nombre de categoría requerido' });
 
-    const costoUnitario = toNumber(req.body.costoUnitario);
     const exists = await InventoryCategoryModel.findOne({ nombre, deleted: false }).lean();
     if (exists) return res.status(400).json({ success: false, message: 'La categoría ya existe' });
 
-    const category = await InventoryCategoryModel.create({ nombre, costoUnitario, personalizada: true });
+    const category = await InventoryCategoryModel.create({ nombre, personalizada: true });
     return res.status(201).json({ success: true, data: category });
   } catch (error) {
     console.error('[almacen:createCategory]', error.message);
@@ -86,23 +79,21 @@ const createCategory = async (req, res) => {
 
 // ─── Items ───────────────────────────────────────────────────────────────────
 
+/**
+ * Lista items filtrando por categoría, código, nombre y tipo.
+ * Los filtros se construyen a partir de criterios permitidos (nunca se
+ * construyen consultas directamente desde la entrada del cliente).
+ */
 const listItems = async (req, res) => {
   try {
-    const categoria = String(req.query.categoria || '').trim();
-    const tipo = String(req.query.tipo || '').trim();
-    const search = String(req.query.search || '').trim();
-    const filter = { deleted: false };
-    if (categoria) filter.categoria = categoria;
-    if (tipo) filter.tipo = tipo;
-    if (search) {
-      // Búsqueda por nombre o código.
-      filter.$or = [
-        { nombre: { $regex: search, $options: 'i' } },
-        { codigo: { $regex: search, $options: 'i' } },
-      ];
-    }
+    const rows = await almacenService.searchItems({
+      categoria: req.query.categoria,
+      codigo: req.query.codigo,
+      nombre: req.query.nombre,
+      tipo: req.query.tipo,
+      search: req.query.search,
+    });
 
-    const rows = await InventoryItemModel.find(filter).sort({ nombre: 1 }).lean();
     return res.status(200).json({ success: true, data: rows });
   } catch (error) {
     console.error('[almacen:listItems]', error.message);
@@ -115,37 +106,33 @@ const createItem = async (req, res) => {
     const nombre = String(req.body.nombre || '').trim();
     if (!nombre) return res.status(400).json({ success: false, message: 'Nombre del item requerido' });
 
-    const codigo = String(req.body.codigo || '').trim();
     const categoria = String(req.body.categoria || '').trim();
     if (!categoria) return res.status(400).json({ success: false, message: 'Categoría requerida' });
 
-    // Evitar duplicados (mismo nombre o mismo código) entre items no eliminados.
-    const duplicado = await InventoryItemModel.findOne({
-      deleted: false,
-      $or: [
-        { nombre },
-        ...(codigo ? [{ codigo }] : []),
-      ],
-    }).lean();
-    if (duplicado) {
-      return res.status(400).json({
-        success: false,
-        message: duplicado.nombre === nombre
-          ? `Ya existe un item con el nombre "${nombre}"`
-          : `Ya existe un item con el código "${codigo}"`,
-      });
+    const tipo = String(req.body.tipo || 'Componente').trim();
+
+    // Si el material ya existe (mismo nombre + categoría + tipo), se reutiliza
+    // en lugar de crear un duplicado. El stock se acumula en el mismo código.
+    const existente = await almacenService.findMaterialRegistrado({ nombre, categoria, tipo });
+    if (existente) {
+      await almacenService.ensureStockInitial(existente._id);
+      return res.status(200).json({ success: true, data: existente, reutilizado: true });
     }
+
+    // El código es autogenerado cuando el usuario no informa uno.
+    const codigo = await almacenService.resolveItemCodigo(req.body.codigo);
+    await almacenService.ensureItemNoDuplicado({ codigo });
 
     const catExists = await InventoryCategoryModel.findOne({ nombre: categoria, deleted: false }).lean();
     if (!catExists) {
-      await InventoryCategoryModel.create({ nombre: categoria, costoUnitario: 0, personalizada: true });
+      await InventoryCategoryModel.create({ nombre: categoria, personalizada: true });
     }
 
     const item = await InventoryItemModel.create({
       codigo,
       nombre,
       categoria,
-      tipo: String(req.body.tipo || 'Componente').trim(),
+      tipo,
       costoUnitario: toNumber(req.body.costoUnitario),
       stockSeguridad: toNumber(req.body.stockSeguridad),
       fechaCalibracion: req.body.fechaCalibracion || null,
@@ -155,8 +142,7 @@ const createItem = async (req, res) => {
     await InventoryStockModel.create({ itemId: item._id });
     return res.status(201).json({ success: true, data: item });
   } catch (error) {
-    console.error('[almacen:createItem]', error.message);
-    return res.status(500).json({ success: false, message: 'Error al crear item' });
+    return handleServiceError(res, error, 'Error al crear item');
   }
 };
 
@@ -178,6 +164,12 @@ const updateItem = async (req, res) => {
 
     if (Object.keys(update).length === 0) return res.status(400).json({ success: false, message: 'No hay campos para actualizar' });
 
+    // Se valida duplicado solo si el código cambia.
+    await almacenService.ensureItemNoDuplicado({
+      codigo: update.codigo !== undefined ? String(update.codigo).trim() : undefined,
+      excludeId: id,
+    });
+
     const item = await InventoryItemModel.findOneAndUpdate(
       { _id: id, deleted: false },
       { $set: update },
@@ -187,18 +179,28 @@ const updateItem = async (req, res) => {
 
     return res.status(200).json({ success: true, data: item });
   } catch (error) {
-    console.error('[almacen:updateItem]', error.message);
-    return res.status(500).json({ success: false, message: 'Error al actualizar item' });
+    return handleServiceError(res, error, 'Error al actualizar item');
   }
 };
 
 // ─── Stock ───────────────────────────────────────────────────────────────────
 
+/**
+ * Stock explotado por LOTE: una fila por cada ingreso realizado.
+ *
+ * Cada fila conserva el costo unitario con el que ingresó y las unidades que
+ * le quedan disponibles, para poder diferenciar por costo de ingreso.
+ * Se agrupa visualmente por categoría y se puede filtrar por categoría,
+ * código, nombre y tipo.
+ */
 const getStock = async (req, res) => {
   try {
     const categoria = String(req.query.categoria || '').trim();
+    const codigo = String(req.query.codigo || '').trim();
+    const nombre = String(req.query.nombre || '').trim();
+    const tipo = String(req.query.tipo || '').trim();
     const page = Math.max(toNumber(req.query.page) || 1, 1);
-    const pageSize = Math.min(Math.max(toNumber(req.query.pageSize) || 50, 1), 200);
+    const pageSize = Math.min(Math.max(toNumber(req.query.pageSize) || 100, 1), 500);
 
     const pipeline = [
       { $lookup: { from: 'InventoryItem', localField: 'itemId', foreignField: '_id', as: '_item' } },
@@ -206,56 +208,75 @@ const getStock = async (req, res) => {
       { $match: { '_item.deleted': false } },
       { $addFields: {
         itemNombre: '$_item.nombre',
-        itemCodigo: '$_item.codigo',
+        itemCodigo: { $ifNull: ['$codigo', ''] },
         itemCategoria: '$_item.categoria',
         itemTipo: '$_item.tipo',
         itemCostoUnitario: '$_item.costoUnitario',
         itemStockSeguridad: '$_item.stockSeguridad',
         itemFechaCalibracion: '$_item.fechaCalibracion',
         itemDuracionCalibracionMeses: '$_item.duracionCalibracionMeses',
-        ultimoComentario: { $ifNull: ['$ultimoComentario', ''] },
+        totalLote: {
+          $multiply: [
+            { $ifNull: ['$cantidadDisponible', 0] },
+            { $ifNull: ['$costoUnitario', 0] },
+          ],
+        },
       }},
-      { $sort: { itemCategoria: 1, itemNombre: 1 } },
     ];
 
-    if (categoria) pipeline.unshift({ $match: { '_item.categoria': categoria } });
+    // Filtros permitidos: categoría, código, nombre y tipo.
+    // Se aplican sobre los campos ya proyectados del item (después del $unwind).
+    const filtrosItem = {};
+    if (categoria) filtrosItem.itemCategoria = categoria;
+    if (tipo) filtrosItem.itemTipo = tipo;
+    if (codigo) filtrosItem.itemCodigo = { $regex: almacenService.escapeRegExp(codigo), $options: 'i' };
+    if (nombre) filtrosItem.itemNombre = { $regex: almacenService.escapeRegExp(nombre), $options: 'i' };
 
-    const countResult = await InventoryStockModel.aggregate([...pipeline, { $count: 'total' }]);
+    if (Object.keys(filtrosItem).length > 0) {
+      pipeline.push({ $match: filtrosItem });
+    }
+
+    pipeline.push({ $sort: { itemCategoria: 1, itemNombre: 1, fechaIngreso: -1 } });
+
+    const countResult = await InventoryBatchModel.aggregate([...pipeline, { $count: 'total' }]);
     const total = countResult[0]?.total || 0;
     const skip = (page - 1) * pageSize;
 
-    const rows = await InventoryStockModel.aggregate([...pipeline, { $skip: skip }, { $limit: pageSize }]);
-
-    // Obtener costoUnitarioBase desde InventoryCategory
-    const catNames = [...new Set(rows.map((r) => r.itemCategoria).filter(Boolean))];
-    const cats = await InventoryCategoryModel.find({ nombre: { $in: catNames }, deleted: false })
-      .select('nombre costoUnitario')
-      .lean();
-    const catCostoMap = new Map(cats.map((c) => [c.nombre, c.costoUnitario || 0]));
+    const rows = await InventoryBatchModel.aggregate([...pipeline, { $skip: skip }, { $limit: pageSize }]);
 
     const grouped = rows.reduce((acc, row) => {
       const cat = row.itemCategoria || 'Sin categoría';
       if (!acc[cat]) acc[cat] = { categoria: cat, items: [], subtotal: 0, totalBase: 0 };
-      const costoBase = catCostoMap.get(cat) || 0;
-      const totalUnitarioBase = (row.cantidad || 0) * costoBase;
+
+      const cantidadDisponible = row.cantidadDisponible || 0;
+      const costoIngreso = row.costoUnitario || 0;
+      const totalLote = row.totalLote || 0;
+
       acc[cat].items.push({
         _id: row._id,
+        batchId: row._id,
         itemId: row.itemId,
         codigo: row.itemCodigo,
         nombre: row.itemNombre,
         tipo: row.itemTipo,
-        cantidad: row.cantidad || 0,
-        montoTotalIngreso: row.montoTotalIngreso || 0,
-        costoUnitarioActual: row.costoUnitarioActual || 0,
-        costoUnitarioConfig: costoBase,
-        totalUnitarioBase,
+        // Cantidad remanente del lote y cantidad originalmente ingresada.
+        cantidad: cantidadDisponible,
+        cantidadIngresada: row.cantidad || 0,
+        // Costo unitario con el que ingresó este lote.
+        costoUnitarioConfig: row.itemCostoUnitario || 0,
+        costoUnitarioActual: costoIngreso,
+        montoTotalIngreso: row.monto || 0,
+        totalUnitarioBase: totalLote,
+        fechaIngreso: row.fechaIngreso,
         stockSeguridad: row.itemStockSeguridad || 0,
-        ultimoComentario: row.ultimoComentario || '',
+        ultimoComentario: row.comentarios || '',
         fechaCalibracion: row.itemFechaCalibracion,
         duracionCalibracionMeses: row.itemDuracionCalibracionMeses,
       });
-      acc[cat].subtotal += row.montoTotalIngreso || 0;
-      acc[cat].totalBase += totalUnitarioBase;
+
+      // Subtotal de la categoría: valor del stock remanente a su costo de ingreso.
+      acc[cat].subtotal += totalLote;
+      acc[cat].totalBase += totalLote;
       return acc;
     }, {});
 
@@ -277,6 +298,25 @@ const getStock = async (req, res) => {
   }
 };
 
+/**
+ * Lista los lotes (ingresos) de un material, con su costo y saldo disponible.
+ * Se usa en el formulario de salidas para elegir de qué lote se retira.
+ */
+const getLotes = async (req, res) => {
+  try {
+    const itemId = String(req.query.itemId || '').trim();
+    if (!itemId) return res.status(400).json({ success: false, message: 'itemId requerido' });
+
+    const soloDisponibles = String(req.query.soloDisponibles || '') === 'true';
+    const rows = await almacenService.listLotesMaterial({ itemId, soloDisponibles });
+
+    return res.status(200).json({ success: true, data: rows });
+  } catch (error) {
+    console.error('[almacen:getLotes]', error.message);
+    return res.status(500).json({ success: false, message: 'Error al obtener lotes' });
+  }
+};
+
 // ─── Movimientos (Ingreso / Salida) ──────────────────────────────────────────
 
 const registerIngreso = async (req, res) => {
@@ -287,15 +327,15 @@ const registerIngreso = async (req, res) => {
     const costoUnitarioActual = toNumber(req.body.costoUnitarioActual);
     const destino = String(req.body.destino || 'ALMACEN').trim().toUpperCase();
     const destinoRef = String(req.body.destinoRef || (destino === 'ALMACEN' ? 'ALMACEN' : '')).trim();
+    const elementoPEP = destino === 'PEP' ? String(req.body.elementoPEP || '').trim() : '';
     const comentarios = String(req.body.comentarios || '').trim();
     const usuario = getEmail(req);
 
     if (!itemId || cantidad <= 0) return res.status(400).json({ success: false, message: 'Item y cantidad > 0 requeridos' });
     if (destino !== 'ALMACEN' && destino !== 'PEP') return res.status(400).json({ success: false, message: 'Destino debe ser ALMACEN o PEP' });
-    if (destino === 'PEP' && !destinoRef) return res.status(400).json({ success: false, message: 'Debe seleccionar un PEP de destino' });
-    if (destino === 'PEP' && !(await ensurePepAdjudicado(destinoRef))) {
-      return res.status(400).json({ success: false, message: 'El PEP de destino no existe o no está adjudicado' });
-    }
+
+    // El destino PEP exige PEP adjudicado y elemento PEP habilitado (regla compartida con Logística).
+    await almacenService.validateDestinoPep({ destino, destinoRef, elementoPEP });
 
     const item = await InventoryItemModel.findOne({ _id: itemId, deleted: false });
     if (!item) return res.status(404).json({ success: false, message: 'Item no encontrado en catálogo' });
@@ -305,63 +345,89 @@ const registerIngreso = async (req, res) => {
 
     stock.cantidad += cantidad;
     stock.montoTotalIngreso += monto;
+    // El costo vigente del stock refleja el último ingreso, pero cada lote
+    // conserva su propio costo (no se revalúa el stock ya existente).
     stock.costoUnitarioActual = costoUnitarioActual > 0 ? costoUnitarioActual : stock.costoUnitarioActual;
     stock.ultimoIngresoAt = new Date();
     if (comentarios) stock.ultimoComentario = comentarios;
     await stock.save();
 
-    await InventoryMovementModel.create({
+    // El costo unitario base del material se actualiza con el último ingreso.
+    await almacenService.syncCostoUnitarioBase(itemId, costoUnitarioActual);
+
+    const movimiento = await InventoryMovementModel.create({
       tipo: 'INGRESO', itemId, cantidad,
       costoUnitario: costoUnitarioActual, monto,
-      destino, destinoRef, comentarios,
+      destino, destinoRef, elementoPEP, comentarios,
       categoria: item.categoria, usuario,
     });
 
-    return res.status(201).json({ success: true, message: 'Ingreso registrado correctamente', data: stock });
+    // Cada ingreso genera su propio lote, con su costo y cantidad disponible.
+    const lote = await almacenService.crearLoteIngreso({
+      itemId,
+      movementId: movimiento._id,
+      codigo: item.codigo,
+      cantidad,
+      costoUnitario: costoUnitarioActual,
+      monto,
+      comentarios,
+      usuario,
+      fechaIngreso: movimiento.createdAt || new Date(),
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Ingreso registrado correctamente',
+      data: { ...stock.toObject(), lote },
+    });
   } catch (error) {
-    console.error('[almacen:registerIngreso]', error.message);
-    return res.status(500).json({ success: false, message: 'Error al registrar ingreso' });
+    return handleServiceError(res, error, 'Error al registrar ingreso');
   }
 };
 
 const registerSalida = async (req, res) => {
   try {
     const itemId = String(req.body.itemId || '').trim();
+    const batchId = String(req.body.batchId || '').trim();
     const cantidad = toNumber(req.body.cantidad);
     const destino = String(req.body.destino || 'ALMACEN').trim().toUpperCase();
     const destinoRef = String(req.body.destinoRef || (destino === 'ALMACEN' ? 'ALMACEN' : '')).trim();
+    const elementoPEP = destino === 'PEP' ? String(req.body.elementoPEP || '').trim() : '';
     const comentarios = String(req.body.comentarios || '').trim();
     const usuario = getEmail(req);
 
     if (!itemId || cantidad <= 0) return res.status(400).json({ success: false, message: 'Item y cantidad > 0 requeridos' });
+    if (!batchId) return res.status(400).json({ success: false, message: 'Debe seleccionar el lote (ingreso) a retirar' });
     if (destino !== 'ALMACEN' && destino !== 'PEP') return res.status(400).json({ success: false, message: 'Destino debe ser ALMACEN o PEP' });
-    if (destino === 'PEP' && !destinoRef) return res.status(400).json({ success: false, message: 'Debe seleccionar PEP de destino' });
-    if (destino === 'PEP' && !(await ensurePepAdjudicado(destinoRef))) {
-      return res.status(400).json({ success: false, message: 'El PEP de destino no existe o no está adjudicado' });
-    }
 
-    const stock = await InventoryStockModel.findOne({ itemId });
-    if (!stock || stock.cantidad < cantidad) return res.status(400).json({ success: false, message: 'Stock insuficiente' });
+    await almacenService.validateDestinoPep({ destino, destinoRef, elementoPEP });
 
     const item = await InventoryItemModel.findOne({ _id: itemId, deleted: false });
     if (!item) return res.status(404).json({ success: false, message: 'Item no encontrado' });
 
-    const costoUnitario = stock.costoUnitarioActual;
+    // La salida se imputa al lote elegido y usa SU costo unitario de ingreso.
+    const { costoUnitario } = await almacenService.consumirLote({ batchId, cantidad });
     const monto = costoUnitario * cantidad;
+
+    const stock = await InventoryStockModel.findOne({ itemId });
+    if (!stock || stock.cantidad < cantidad) {
+      // Se restituye el lote para no dejar el descuento aplicado.
+      await InventoryBatchModel.updateOne({ _id: batchId }, { $inc: { cantidadDisponible: cantidad } });
+      return res.status(400).json({ success: false, message: 'Stock insuficiente' });
+    }
 
     stock.cantidad -= cantidad;
     await stock.save();
 
     await InventoryMovementModel.create({
-      tipo: 'SALIDA', itemId, cantidad, costoUnitario, monto,
-      destino, destinoRef, comentarios,
+      tipo: 'SALIDA', itemId, batchId, cantidad, costoUnitario, monto,
+      destino, destinoRef, elementoPEP, comentarios,
       categoria: item.categoria, usuario,
     });
 
     return res.status(201).json({ success: true, message: 'Salida registrada correctamente', data: stock });
   } catch (error) {
-    console.error('[almacen:registerSalida]', error.message);
-    return res.status(500).json({ success: false, message: 'Error al registrar salida' });
+    return handleServiceError(res, error, 'Error al registrar salida');
   }
 };
 
@@ -376,36 +442,53 @@ const registerMultipleSalidas = async (req, res) => {
 
     for (const entry of items) {
       const itemId = String(entry.itemId || '').trim();
+      const batchId = String(entry.batchId || '').trim();
       const cantidad = toNumber(entry.cantidad);
       const destino = String(entry.destino || 'ALMACEN').trim().toUpperCase();
       const destinoRef = String(entry.destinoRef || (destino === 'ALMACEN' ? 'ALMACEN' : '')).trim();
+      const elementoPEP = destino === 'PEP' ? String(entry.elementoPEP || '').trim() : '';
       const comentarios = String(entry.comentarios || '').trim();
 
       if (!itemId || cantidad <= 0) { errores.push({ itemId: itemId || '?', error: 'Item y cantidad > 0 requeridos' }); continue; }
+      if (!batchId) { errores.push({ itemId, error: 'Debe seleccionar el lote (ingreso) a retirar' }); continue; }
       if (destino !== 'ALMACEN' && destino !== 'PEP') { errores.push({ itemId, error: 'Destino inválido' }); continue; }
-      if (destino === 'PEP' && !destinoRef) { errores.push({ itemId, error: 'PEP requerido' }); continue; }
-      if (destino === 'PEP' && !(await ensurePepAdjudicado(destinoRef))) {
-        errores.push({ itemId, error: 'El PEP de destino no existe o no está adjudicado' });
+
+      try {
+        await almacenService.validateDestinoPep({ destino, destinoRef, elementoPEP });
+      } catch (error) {
+        errores.push({ itemId, error: error.message });
         continue;
       }
-
-      const stock = await InventoryStockModel.findOne({ itemId });
-      if (!stock || stock.cantidad < cantidad) { errores.push({ itemId, error: `Stock insuficiente (disp: ${stock?.cantidad || 0})` }); continue; }
 
       const item = await InventoryItemModel.findOne({ _id: itemId, deleted: false });
       if (!item) { errores.push({ itemId, error: 'Item no encontrado' }); continue; }
 
-      const costoUnitario = stock.costoUnitarioActual;
+      // La salida se imputa al lote elegido y usa SU costo unitario de ingreso.
+      let costoUnitario;
+      try {
+        ({ costoUnitario } = await almacenService.consumirLote({ batchId, cantidad }));
+      } catch (error) {
+        errores.push({ itemId, error: error.message });
+        continue;
+      }
+
+      const stock = await InventoryStockModel.findOne({ itemId });
+      if (!stock || stock.cantidad < cantidad) {
+        await InventoryBatchModel.updateOne({ _id: batchId }, { $inc: { cantidadDisponible: cantidad } });
+        errores.push({ itemId, error: `Stock insuficiente (disp: ${stock?.cantidad || 0})` });
+        continue;
+      }
+
       const monto = costoUnitario * cantidad;
       stock.cantidad -= cantidad;
       await stock.save();
 
       await InventoryMovementModel.create({
-        tipo: 'SALIDA', itemId, cantidad, costoUnitario, monto,
-        destino, destinoRef, comentarios, categoria: item.categoria, usuario,
+        tipo: 'SALIDA', itemId, batchId, cantidad, costoUnitario, monto,
+        destino, destinoRef, elementoPEP, comentarios, categoria: item.categoria, usuario,
       });
 
-      resultados.push({ itemId, nombre: item.nombre, cantidad });
+      resultados.push({ itemId, nombre: item.nombre, cantidad, costoUnitario });
     }
 
     return res.status(200).json({
@@ -448,7 +531,6 @@ const getKardex = async (req, res) => {
     return res.status(500).json({ success: false, message: 'Error al obtener kardex' });
   }
 };
-
 const getKardexByItem = async (req, res) => {
   try {
     const { itemId } = req.params;
@@ -475,8 +557,8 @@ const getKardexByItem = async (req, res) => {
 
 const getDashboard = async (req, res) => {
   try {
-    const [stockRows, itemsBajoSeguridad, calibraciones, stockConItems] = await Promise.all([
-      InventoryStockModel.find().populate('itemId', 'nombre categoria tipo').lean(),
+    const [items, itemsBajoSeguridad, calibraciones, lotes] = await Promise.all([
+      InventoryItemModel.find({ deleted: false }).select('codigo nombre').lean(),
       InventoryStockModel.aggregate([
         { $lookup: { from: 'InventoryItem', localField: 'itemId', foreignField: '_id', as: '_item' } },
         { $unwind: '$_item' },
@@ -488,27 +570,17 @@ const getDashboard = async (req, res) => {
       InventoryItemModel.find({ deleted: false, fechaCalibracion: { $ne: null }, duracionCalibracionMeses: { $gt: 0 } })
         .select('nombre categoria fechaCalibracion duracionCalibracionMeses')
         .lean(),
-      InventoryStockModel.aggregate([
-        { $lookup: { from: 'InventoryItem', localField: 'itemId', foreignField: '_id', as: '_item' } },
-        { $unwind: '$_item' },
-        { $match: { '_item.deleted': false } },
-        { $project: { cantidad: 1, categoria: '$_item.categoria', _id: 0 } },
-      ]),
+      // Los lotes son la fuente del stock: cada fila tiene su costo y saldo.
+      InventoryBatchModel.find().select('cantidadDisponible costoUnitario').lean(),
     ]);
 
-    const totalValorStock = stockRows.reduce((s, r) => s + (r.montoTotalIngreso || 0), 0);
-    const totalItems = stockRows.length;
-
-    // Calcular valor stock base desde InventoryCategory
-    const catNames = [...new Set(stockConItems.map((r) => r.categoria).filter(Boolean))];
-    const cats = await InventoryCategoryModel.find({ nombre: { $in: catNames }, deleted: false })
-      .select('nombre costoUnitario')
-      .lean();
-    const catCostoMap = new Map(cats.map((c) => [c.nombre, c.costoUnitario || 0]));
-    const totalValorStockBase = stockConItems.reduce((s, r) => {
-      const costoBase = catCostoMap.get(r.categoria) || 0;
-      return s + (r.cantidad || 0) * costoBase;
-    }, 0);
+    // El valor del stock se calcula con el costo y el saldo de cada lote.
+    const totalValorStock = lotes.reduce(
+      (s, l) => s + (l.cantidadDisponible || 0) * (l.costoUnitario || 0),
+      0,
+    );
+    const totalValorStockBase = totalValorStock;
+    const totalItems = items.length;
 
     const ahora = new Date();
     const proximasCalibraciones = calibraciones
@@ -534,7 +606,7 @@ const getDashboard = async (req, res) => {
 module.exports = {
   listCategories, createCategory,
   listItems, createItem, updateItem,
-  getStock,
+  getStock, getLotes,
   registerIngreso, registerSalida, registerMultipleSalidas,
   getKardex, getKardexByItem,
   getDashboard,
